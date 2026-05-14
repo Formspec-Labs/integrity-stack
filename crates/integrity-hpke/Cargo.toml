@@ -8,6 +8,53 @@ description = "Shared HPKE wrap/unwrap primitives for integrity profiles"
 [package.metadata.cargo-machete]
 ignored = ["hkdf", "sha2"]
 
+# Phase-1 HPKE wrap/unwrap for integrity envelopes that carry Trellis
+# `KeyBagEntry.wrapped_dek` bytes (Core §9.4 suite 1:
+# RFC 9180 Base mode, X25519-HKDF-SHA256-ChaCha20-Poly1305).
+#
+# Ownership moved here from `trellis-hpke` per ADR-0074 so HPKE is an
+# integrity-stack primitive rather than a Trellis-only implementation. The
+# `trellis-hpke` crate is now a re-export shim.
+#
+# Crate selection: `hpke` (rozbb/rust-hpke), version-pinned per Trellis
+# ADR 0009 (`../trellis/thoughts/adr/0009-hpke-crate-selection.md`).
+# Pinned to `=0.13.0` (latest stable at adoption). The `0.14.0-pre.2`
+# pre-release pulled in a broken `sha3 0.11.0-rc.7` chain; do not opt into
+# pre-release crypto here.
+#
+# `wrap_dek` / `unwrap_dek` go through hpke's RFC-blessed public API
+# (`single_shot_seal_in_place_detached` / `setup_receiver`). Production
+# randomness is injected through `integrity-seam::SecureRandom`; the adapter
+# satisfies hpke's infallible `RngCore` boundary while reporting source
+# failures as `HpkeError::Random`.
+#
+# `wrap_dek_with_pinned_ephemeral` is fixture-only and gated behind the
+# `test-vectors` Cargo feature (default off). It bypasses hpke's
+# `setup_sender` (which always derives the ephemeral via
+# `DeriveKeyPair(GenerateRandomBytes())`) and reaches into hpke's lower-level
+# `LabeledExtract` / `ExtractAndExpand` helpers — the only way to produce
+# HPKE bytes that match the Python fixture generator's "raw 32-byte seed =
+# X25519 scalar" carve-out (Core §9.4 test-vector carve-out).
+#
+# # DO NOT BUMP without re-verifying:
+# (1) `hpke = "=0.13.0"` — `wrap_dek_with_pinned_ephemeral` reaches into
+#     `hpke::kdf::{labeled_extract, extract_and_expand, LabeledExpand}`
+#     (all `#[doc(hidden)]` but `pub`). Any minor-version bump may make
+#     these symbols private and silently break the fixture-only carve-out
+#     path that produces `append/004-hpke-wrapped-inline` bytes.
+# (2) `chacha20poly1305 = "=0.10.1"`, `hkdf = "=0.12.4"`,
+#     `x25519-dalek = "=2.0.1"`, `sha2 = "=0.10.9"`,
+#     `rand_core = "=0.9.5"` — byte-exact reproducibility for
+#     `append/004` flows through these directly; AEAD nonce schedules,
+#     KDF derivation, X25519 scalar clamping, and HKDF chaining are
+#     under-specified to the version. Re-run
+#     `cargo test -p integrity-hpke --features test-vectors` and
+#     `cargo test -p trellis-hpke --features test-vectors` after any bump
+#     and confirm the `append_004_byte_match.rs` byte oracle is still green.
+# (3) Crate spike → ADR promotion: Trellis ADR 0009 §Lifecycle pins
+#     "promote-on-bump." Any bump here is the trigger to re-read the ADR
+#     and update its decision-log entry.
+
 [features]
 default = []
 test-vectors = []
