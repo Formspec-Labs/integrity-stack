@@ -7,6 +7,12 @@
 //! public surface.
 
 pub mod random;
+pub mod seam;
 
 #[doc(inline)]
 pub use random::{OsSecureRandom, SecureRandom};
+#[doc(inline)]
+pub use seam::{
+    AsyncSealer, SealError, SealInput, SealInputBuilder, SealRequest, SealedEnvelope,
+    default_seal_input,
+};
