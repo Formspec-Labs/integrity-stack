@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::SigningKey;
 use integrity_cose::default_async_sign;
-use integrity_seam::{SealRequest, default_seal_input};
+use integrity_seam::{KidInput, SealRequest, default_seal_input};
 
 #[tokio::test]
 async fn round_trip_via_cose_sign1() {
@@ -9,7 +9,7 @@ async fn round_trip_via_cose_sign1() {
     let req = SealRequest {
         domain: "wos.case_event/v1".into(),
         payload: serde_json::json!({"x":1}),
-        kid_input: sk.verifying_key().to_bytes(),
+        kid_input: KidInput::Phase1Ed25519(sk.verifying_key().to_bytes()),
     };
 
     let input = default_seal_input(&req).unwrap();

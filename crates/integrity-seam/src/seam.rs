@@ -13,6 +13,17 @@ use serde::{Deserialize, Serialize};
 /// Phase-1 signing suite identifier used by current integrity profiles.
 const SUITE_ID_PHASE_1: u64 = 1;
 
+/// Identifies the suite-specific material used to derive a signing `kid`.
+///
+/// This enum is intentionally locked to Trellis Core §8 signing-key-registry
+/// suite codepoints. Phase 1 Ed25519 is the only staffed suite today; future
+/// variants must name the Core §8 codepoint they widen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KidInput {
+    /// Phase-1 Ed25519 public key bytes.
+    Phase1Ed25519([u8; 32]),
+}
+
 /// Describes one payload that should become a seal input.
 #[derive(Debug, Clone)]
 pub struct SealRequest {
@@ -22,8 +33,8 @@ pub struct SealRequest {
     /// JSON payload to canonicalize.
     pub payload: serde_json::Value,
 
-    /// Public-key bytes or equivalent stable key material for `kid` derivation.
-    pub kid_input: [u8; 32],
+    /// Suite-specific material for `kid` derivation.
+    pub kid_input: KidInput,
 }
 
 /// Contains deterministic bytes ready for signing.
@@ -107,7 +118,7 @@ pub fn default_seal_input(req: &SealRequest) -> Result<SealInput, SealError> {
 
     let digest = integrity_cbor::sha256_bytes(&domain_separated_bytes);
     let canonical_event_hash = format!("sha256:{}", hex::encode(digest));
-    let kid = hex::encode(derive_phase1_kid(req.kid_input));
+    let kid = hex::encode(derive_kid(req.kid_input));
 
     Ok(SealInput {
         domain: req.domain.clone(),
@@ -118,6 +129,17 @@ pub fn default_seal_input(req: &SealRequest) -> Result<SealInput, SealError> {
     })
 }
 
+fn derive_kid(kid_input: KidInput) -> [u8; 16] {
+    match kid_input {
+        KidInput::Phase1Ed25519(public_key) => derive_phase1_kid(public_key),
+    }
+}
+
+/// Derives the Phase-1 Ed25519 `kid`.
+///
+/// This intentionally mirrors `integrity_cose::derive_kid` without depending
+/// on `integrity-cose`: `integrity-seam` is the substrate byte builder, while
+/// `integrity-cose` is the widening point that owns COSE suite helpers.
 fn derive_phase1_kid(public_key: [u8; 32]) -> [u8; 16] {
     let mut preimage = integrity_cbor::encode_uint(SUITE_ID_PHASE_1);
     preimage.extend_from_slice(&public_key);

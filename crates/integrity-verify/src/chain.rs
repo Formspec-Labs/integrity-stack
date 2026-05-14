@@ -23,6 +23,9 @@ pub struct ChainFinding {
 }
 
 /// Result of [`ChainContinuityCheck::run`].
+///
+/// `ChainContinuityCheck` is purely prev-hash linkage. WOS row payload
+/// re-hash lives outside `integrity-verify`.
 pub struct ChainContinuityCheck {
     pub findings: Vec<ChainFinding>,
 }

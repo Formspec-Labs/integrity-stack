@@ -1,4 +1,4 @@
-use integrity_seam::{SealRequest, default_seal_input};
+use integrity_seam::{KidInput, SealRequest, default_seal_input};
 use proptest::prelude::*;
 
 #[test]
@@ -6,7 +6,7 @@ fn build_seal_input_is_deterministic() {
     let req = SealRequest {
         domain: "wos.case_event/v1".into(),
         payload: serde_json::json!({"case_id":"C-1","phase":"submit"}),
-        kid_input: [7u8; 32],
+        kid_input: KidInput::Phase1Ed25519([7u8; 32]),
     };
 
     let a = default_seal_input(&req).unwrap();
@@ -36,12 +36,12 @@ proptest! {
         let a = default_seal_input(&SealRequest {
             domain: "d".into(),
             payload: serde_json::Value::Object(o1),
-            kid_input: [0u8; 32],
+            kid_input: KidInput::Phase1Ed25519([0u8; 32]),
         }).unwrap();
         let b = default_seal_input(&SealRequest {
             domain: "d".into(),
             payload: serde_json::Value::Object(o2),
-            kid_input: [0u8; 32],
+            kid_input: KidInput::Phase1Ed25519([0u8; 32]),
         }).unwrap();
 
         prop_assert_eq!(a.canonical_event_hash, b.canonical_event_hash);

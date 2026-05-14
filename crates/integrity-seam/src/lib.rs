@@ -13,6 +13,6 @@ pub mod seam;
 pub use random::{OsSecureRandom, SecureRandom};
 #[doc(inline)]
 pub use seam::{
-    AsyncSealer, SealError, SealInput, SealInputBuilder, SealRequest, SealedEnvelope,
+    AsyncSealer, KidInput, SealError, SealInput, SealInputBuilder, SealRequest, SealedEnvelope,
     default_seal_input,
 };
