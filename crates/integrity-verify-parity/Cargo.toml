@@ -1,0 +1,17 @@
+[package]
+name = "integrity-verify-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parity harness for the Trellis verifier to integrity-verify cutover"
+
+[dependencies]
+ciborium = "0.2"
+integrity-verify = { path = "../integrity-verify" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+trellis-verify-wos = { path = "../../../trellis/crates/trellis-verify-wos" }
+zip = { version = "8.5.1", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+glob = "0.3"

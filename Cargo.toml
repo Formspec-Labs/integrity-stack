@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/integrity-bundle",
+    "crates/integrity-canonical",
+    "crates/integrity-cbor",
+    "crates/integrity-cose",
+    "crates/integrity-event",
+    "crates/integrity-verify",
+    "crates/integrity-verify-parity",
+    "crates/integrity-verify-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"

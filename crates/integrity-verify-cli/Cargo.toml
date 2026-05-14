@@ -1,0 +1,19 @@
+[package]
+name = "integrity-verify-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone offline verifier CLI over integrity-verify (CP §12 O-4 / E-10)"
+
+[[bin]]
+name = "integrity-verify"
+path = "src/main.rs"
+
+[dependencies]
+integrity-bundle = { path = "../integrity-bundle" }
+integrity-cose = { path = "../integrity-cose" }
+integrity-verify = { path = "../integrity-verify" }
+serde_json = "1.0"
+
+[dev-dependencies]
+ed25519-dalek = "2.1"

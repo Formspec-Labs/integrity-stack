@@ -1,0 +1,13 @@
+[package]
+name = "integrity-canonical"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Shared canonical JSON byte primitives for integrity profiles"
+repository = "https://github.com/Formspec-org/formspec-stack"
+
+[dependencies]
+hex = "0.4"
+serde_json = "1"
+serde_json_canonicalizer = "0.3"
+sha2 = "0.10"

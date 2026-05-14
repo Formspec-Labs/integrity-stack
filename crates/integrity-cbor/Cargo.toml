@@ -1,0 +1,13 @@
+[package]
+name = "integrity-cbor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+std = ["ciborium/std", "sha2/std"]
+
+[dependencies]
+ciborium = { version = "0.2", default-features = false }
+sha2 = { version = "0.10", default-features = false }

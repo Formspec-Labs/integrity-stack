@@ -1,0 +1,11 @@
+[package]
+name = "integrity-cose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared COSE_Sign1 byte primitives for integrity profiles"
+
+[dependencies]
+ed25519-dalek = "2.1"
+integrity-cbor = { path = "../integrity-cbor" }
+sha2 = "0.10"

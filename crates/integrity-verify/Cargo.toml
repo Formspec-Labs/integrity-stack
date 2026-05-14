@@ -1,0 +1,19 @@
+[package]
+name = "integrity-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Universal verification phase for integrity envelopes (COSE_Sign1, JCS, deterministic bundles)"
+
+[dependencies]
+ciborium = "0.2"
+ed25519-dalek = "2.1"
+integrity-canonical = { path = "../integrity-canonical" }
+integrity-cose = { path = "../integrity-cose" }
+serde_json = "1.0"
+trellis-cose = { path = "../../../trellis/crates/trellis-cose" }
+trellis-types = { path = "../../../trellis/crates/trellis-types" }
+zip = { version = "8.5.1", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+ed25519-dalek = "2.1"
