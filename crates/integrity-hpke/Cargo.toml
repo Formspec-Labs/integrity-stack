@@ -1,0 +1,22 @@
+[package]
+name = "integrity-hpke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared HPKE wrap/unwrap primitives for integrity profiles"
+
+[package.metadata.cargo-machete]
+ignored = ["hkdf", "sha2"]
+
+[features]
+default = []
+test-vectors = []
+
+[dependencies]
+hpke = { version = "=0.13.0" }
+chacha20poly1305 = "=0.10.1"
+hkdf = "=0.12.4"
+integrity-seam = { path = "../integrity-seam" }
+rand_core = "=0.9.5"
+sha2 = "=0.10.9"
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
