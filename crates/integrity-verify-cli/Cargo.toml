@@ -14,6 +14,7 @@ integrity-bundle = { path = "../integrity-bundle" }
 integrity-cose = { path = "../integrity-cose" }
 integrity-verify = { path = "../integrity-verify" }
 serde_json = "1.0"
+trellis-verify-wos = { path = "../../../trellis/crates/trellis-verify-wos" }
 
 [dev-dependencies]
 ed25519-dalek = "2.1"

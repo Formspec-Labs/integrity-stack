@@ -1,9 +1,10 @@
 // Rust guideline compliant 2026-02-21
 //! CLI argument parsing, dispatch, and output rendering.
 //!
-//! The CLI surface is a single subcommand `verify <bundle.zip>` with a small
-//! set of flags. Parsing is hand-rolled (no `clap` / `argh` dependency) to
-//! match the dep-light posture of `integrity-stack/`.
+//! The CLI surface keeps a universal `verify <bundle.zip>` command and a
+//! production `verify-export <bundle.zip>` command for Trellis/WOS export
+//! bundles. Parsing is hand-rolled (no `clap` / `argh` dependency) to match
+//! the dep-light posture of `integrity-stack/`.
 
 use std::fs;
 use std::io::Write;
@@ -11,10 +12,12 @@ use std::path::PathBuf;
 
 use integrity_bundle::{BundleEntry, read_stored_zip};
 use integrity_cose::decode_cose_sign1;
+use integrity_verify::trellis::Severity;
 use integrity_verify::{
     BundleEntryView, ProfileRegistry, SubstrateTier, VerificationReport, VerifyBundleInput,
     VerifyEvent, verify_universal,
 };
+use trellis_verify_wos::WosVerificationReport;
 
 /// Output format selector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,20 +51,22 @@ pub struct VerifyArgs {
 const CLI_SUBSTRATE_TIER_CEILING: SubstrateTier = SubstrateTier::L0;
 
 const USAGE: &str = "\
-usage: integrity-verify verify <bundle.zip> [--format text|json|both] [--profile <id>]
+usage: integrity-verify <command>
 
-Verifies an offline integrity bundle: enumerates ZIP entries, parses each
-`.cbor` entry as a COSE_Sign1 envelope, runs the universal verifier
-(envelope shape, signature when public keys are available, bundle structural
-ordering), and prints a VerificationReport including substrate_tier.
+commands:
+  verify <bundle.zip> [--format text|json|both] [--profile <id>]
+  verify-export <bundle.zip> [--format text|json|both]
 
-This standalone ZIP command currently supplies envelope events and bundle
-paths only. It does not ingest chain-continuity rows or external witness
-evidence, so its effective substrate_tier ceiling is L0 even though the shared
-report enum is the full L0..L3 ladder per CP §2.4.
+`verify` enumerates ZIP entries, parses each `.cbor` entry as a COSE_Sign1
+envelope, runs the universal verifier (envelope shape, signature when public
+keys are available, bundle structural ordering), and prints a
+VerificationReport including substrate_tier. It does not register permissive
+profile shims; use `verify-export` for WOS/Trellis export semantics.
 
-Exit code 0 on a non-None substrate_tier with no universal failures; exit
-code 1 on any failure.";
+`verify-export` verifies a Trellis/WOS export ZIP through
+trellis_verify_wos::verify_export_zip.
+
+Exit code 0 on a verified report; exit code 1 on any failure.";
 
 /// CLI top-level dispatcher.
 ///
@@ -81,6 +86,10 @@ pub fn run(
             let registry = registry_factory(parsed.profile_override);
             verify_command(&parsed, &registry, stdout)
         }
+        "verify-export" => {
+            let parsed = parse_verify_export_args(&args[2..])?;
+            verify_export_command(&parsed, stdout)
+        }
         "help" | "--help" | "-h" | "" => {
             let _ = stderr.write_all(USAGE.as_bytes());
             let _ = stderr.write_all(b"\n");
@@ -90,6 +99,12 @@ pub fn run(
             "unknown command `{other}` — run `integrity-verify --help` for usage"
         )),
     }
+}
+
+#[derive(Debug)]
+struct VerifyExportArgs {
+    bundle_path: PathBuf,
+    format: OutputFormat,
 }
 
 fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
@@ -139,6 +154,43 @@ fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
         bundle_path,
         format,
         profile_override,
+    })
+}
+
+fn parse_verify_export_args(rest: &[String]) -> Result<VerifyExportArgs, String> {
+    let mut bundle_path: Option<PathBuf> = None;
+    let mut format = OutputFormat::Both;
+
+    let mut index = 0;
+    while index < rest.len() {
+        let token = &rest[index];
+        match token.as_str() {
+            "--format" => {
+                let value = rest
+                    .get(index + 1)
+                    .ok_or_else(|| "--format requires a value".to_string())?;
+                format = OutputFormat::parse(value)?;
+                index += 2;
+            }
+            "--help" | "-h" => {
+                return Err(USAGE.to_string());
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            _ => {
+                if bundle_path.is_some() {
+                    return Err(format!("unexpected positional argument `{token}`"));
+                }
+                bundle_path = Some(PathBuf::from(token));
+                index += 1;
+            }
+        }
+    }
+    let bundle_path = bundle_path.ok_or_else(|| USAGE.to_string())?;
+    Ok(VerifyExportArgs {
+        bundle_path,
+        format,
     })
 }
 
@@ -212,11 +264,57 @@ fn verify_command(
         }
     }
 
-    if report.substrate_tier.is_none() || !report.universal_failures.is_empty() {
+    if !report.universal_failures.is_empty() || !report.bundle_findings.is_empty() {
         return Err(format!(
-            "verification failed: substrate_tier={:?} universal_failures={}",
+            "verification failed: substrate_tier={:?} universal_failures={} bundle_findings={}",
             report.substrate_tier,
-            report.universal_failures.len()
+            report.universal_failures.len(),
+            report.bundle_findings.len()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_export_command(args: &VerifyExportArgs, stdout: &mut dyn Write) -> Result<(), String> {
+    let zip_bytes = fs::read(&args.bundle_path).map_err(|error| {
+        format!(
+            "failed to read bundle `{}`: {error}",
+            args.bundle_path.display()
+        )
+    })?;
+    let report = trellis_verify_wos::verify_export_zip(&zip_bytes);
+    let text_section = render_export_text(&report);
+    let json_section = render_export_json(&report)?;
+
+    match args.format {
+        OutputFormat::Text => stdout
+            .write_all(text_section.as_bytes())
+            .map_err(stdout_err)?,
+        OutputFormat::Json => {
+            stdout
+                .write_all(json_section.as_bytes())
+                .map_err(stdout_err)?;
+            stdout.write_all(b"\n").map_err(stdout_err)?;
+        }
+        OutputFormat::Both => {
+            stdout
+                .write_all(text_section.as_bytes())
+                .map_err(stdout_err)?;
+            stdout.write_all(b"\n").map_err(stdout_err)?;
+            stdout
+                .write_all(json_section.as_bytes())
+                .map_err(stdout_err)?;
+            stdout.write_all(b"\n").map_err(stdout_err)?;
+        }
+    }
+
+    if export_failure_count(&report) != 0
+        || !report.trellis.structure_verified
+        || !report.trellis.integrity_verified
+    {
+        return Err(format!(
+            "export verification failed: failures={}",
+            export_failure_count(&report)
         ));
     }
     Ok(())
@@ -408,6 +506,113 @@ fn render_json(report: &VerificationReport) -> Result<String, String> {
         .map_err(|error| format!("failed to serialize report JSON: {error}"))
 }
 
+fn render_export_text(report: &WosVerificationReport) -> String {
+    let mut out = String::new();
+    out.push_str("integrity-verify export report\n");
+    out.push_str(&format!(
+        "  structure_verified: {}\n",
+        report.trellis.structure_verified
+    ));
+    out.push_str(&format!(
+        "  integrity_verified: {}\n",
+        report.trellis.integrity_verified
+    ));
+    out.push_str(&format!(
+        "  readability_verified: {}\n",
+        report.trellis.readability_verified
+    ));
+    out.push_str(&format!(
+        "  trellis_failures: {}\n",
+        trellis_failure_count(report)
+    ));
+    out.push_str(&format!("  wos_findings: {}\n", report.wos_findings.len()));
+    out.push_str(&format!("  wos_failures: {}\n", wos_failure_count(report)));
+    for finding in &report.wos_findings {
+        out.push_str(&format!(
+            "    - severity={:?} kind={} message={}\n",
+            finding.severity, finding.kind, finding.message
+        ));
+    }
+    out
+}
+
+fn render_export_json(report: &WosVerificationReport) -> Result<String, String> {
+    let mut root = serde_json::Map::new();
+    root.insert(
+        "structure_verified".into(),
+        serde_json::Value::Bool(report.trellis.structure_verified),
+    );
+    root.insert(
+        "integrity_verified".into(),
+        serde_json::Value::Bool(report.trellis.integrity_verified),
+    );
+    root.insert(
+        "readability_verified".into(),
+        serde_json::Value::Bool(report.trellis.readability_verified),
+    );
+    root.insert(
+        "trellis_failures".into(),
+        serde_json::Value::Number(serde_json::Number::from(trellis_failure_count(report))),
+    );
+    root.insert(
+        "wos_failures".into(),
+        serde_json::Value::Number(serde_json::Number::from(wos_failure_count(report))),
+    );
+    root.insert(
+        "verified".into(),
+        serde_json::Value::Bool(
+            report.trellis.structure_verified
+                && report.trellis.integrity_verified
+                && export_failure_count(report) == 0,
+        ),
+    );
+    let wos_findings: Vec<serde_json::Value> = report
+        .wos_findings
+        .iter()
+        .map(|finding| {
+            let mut row = serde_json::Map::new();
+            row.insert(
+                "kind".into(),
+                serde_json::Value::String(finding.kind.clone()),
+            );
+            row.insert(
+                "severity".into(),
+                serde_json::Value::String(format!("{:?}", finding.severity)),
+            );
+            row.insert(
+                "message".into(),
+                serde_json::Value::String(finding.message.clone()),
+            );
+            serde_json::Value::Object(row)
+        })
+        .collect();
+    root.insert(
+        "wos_findings".into(),
+        serde_json::Value::Array(wos_findings),
+    );
+
+    serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .map_err(|error| format!("failed to serialize export report JSON: {error}"))
+}
+
+fn export_failure_count(report: &WosVerificationReport) -> usize {
+    trellis_failure_count(report) + wos_failure_count(report)
+}
+
+fn trellis_failure_count(report: &WosVerificationReport) -> usize {
+    report.trellis.event_failures.len()
+        + report.trellis.checkpoint_failures.len()
+        + report.trellis.proof_failures.len()
+}
+
+fn wos_failure_count(report: &WosVerificationReport) -> usize {
+    report
+        .wos_findings
+        .iter()
+        .filter(|finding| finding.severity == Severity::Failure)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,8 +647,17 @@ mod tests {
     }
 
     #[test]
-    fn usage_declares_standalone_tier_ceiling() {
-        assert!(USAGE.contains("effective substrate_tier ceiling is L0"));
+    fn verify_export_args_accept_flags() {
+        let args =
+            parse_verify_export_args(&["/tmp/bundle.zip".into(), "--format".into(), "json".into()])
+                .unwrap();
+        assert_eq!(args.format, OutputFormat::Json);
+        assert_eq!(args.bundle_path.to_str().unwrap(), "/tmp/bundle.zip");
+    }
+
+    #[test]
+    fn usage_declares_verify_export_command() {
+        assert!(USAGE.contains("verify-export <bundle.zip>"));
     }
 
     #[test]

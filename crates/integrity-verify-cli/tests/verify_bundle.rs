@@ -1,31 +1,27 @@
 // Rust guideline compliant 2026-02-21
-//! Integration test: build a one-event bundle, run `integrity-verify verify`
-//! against the resulting ZIP, assert substrate_tier surfaced and exit code 0.
+//! Integration tests for the offline verifier CLI.
 
 use std::fs;
 use std::process::Command;
 
-use ed25519_dalek::{Signer, SigningKey};
 use integrity_bundle::{Bundle, BundleEntry};
-use integrity_cose::{protected_header_bytes_with_profile_id, sig_structure_bytes, sign1_bytes};
-
-fn build_signed_event(seed: [u8; 32], profile_id: u64, payload: &[u8]) -> Vec<u8> {
-    let signing_key = SigningKey::from_bytes(&seed);
-    let protected = protected_header_bytes_with_profile_id([0xab; 16], profile_id);
-    let sig_struct = sig_structure_bytes(&protected, payload);
-    let signature = signing_key.sign(&sig_struct);
-    sign1_bytes(&protected, payload, signature.to_bytes())
-}
 
 fn write_temp_bundle(name: &str) -> std::path::PathBuf {
-    let event_bytes = build_signed_event([0x12; 32], 1, b"cli-payload");
     let mut bundle = Bundle::new();
-    bundle.add_entry(BundleEntry::new("010-event.cbor", event_bytes));
+    bundle.add_entry(BundleEntry::new(
+        "000-readme.txt",
+        b"bundle metadata".to_vec(),
+    ));
     let zip_bytes = bundle.to_zip_bytes().unwrap();
     let mut path = std::env::temp_dir();
     path.push(name);
     fs::write(&path, zip_bytes).unwrap();
     path
+}
+
+fn trellis_export_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../trellis/fixtures/vectors/export/001-two-event-chain/expected-export.zip")
 }
 
 #[test]
@@ -59,12 +55,12 @@ fn verify_command_reports_substrate_tier_and_exits_zero() {
         "missing JSON field: {stdout}"
     );
     assert!(
-        stdout.contains("cli_tier_ceiling: L0"),
-        "missing text ceiling: {stdout}"
+        stdout.contains("substrate_tier: none"),
+        "missing text tier: {stdout}"
     );
     assert!(
-        stdout.contains("\"cli_tier_ceiling\": \"L0\""),
-        "missing JSON ceiling: {stdout}"
+        stdout.contains("\"substrate_tier\": null"),
+        "missing JSON tier: {stdout}"
     );
 }
 
@@ -88,7 +84,7 @@ fn verify_command_json_only_format() {
     let tier = value
         .get("substrate_tier")
         .expect("missing substrate_tier field");
-    assert_eq!(tier.as_str(), Some("L0"));
+    assert!(tier.is_null(), "expected no tier for bundle-only input");
     assert_eq!(
         value
             .get("cli_tier_ceiling")
@@ -109,5 +105,36 @@ fn verify_command_fails_on_missing_bundle() {
         !output.status.success(),
         "missing-bundle case should fail; stdout={}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn verify_export_command_reports_wos_export_summary() {
+    let binary = env!("CARGO_BIN_EXE_integrity-verify");
+    let output = Command::new(binary)
+        .arg("verify-export")
+        .arg(trellis_export_fixture())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("failed to spawn integrity-verify binary");
+
+    assert!(
+        output.status.success(),
+        "binary exited non-zero: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|err| panic!("stdout was not valid JSON: {err}\n{stdout}"));
+    assert_eq!(
+        value.get("verified").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        value
+            .get("wos_failures")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
     );
 }

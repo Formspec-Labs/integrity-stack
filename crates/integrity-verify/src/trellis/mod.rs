@@ -28,7 +28,7 @@ use ed25519_dalek::ed25519::signature::Verifier;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
-use trellis_cose::sig_structure_bytes;
+use integrity_cose::sig_structure_bytes;
 
 use trellis_types::{CONTENT_DOMAIN, CborHelperError, SUITE_ID_PHASE_1, domain_separated_sha256};
 

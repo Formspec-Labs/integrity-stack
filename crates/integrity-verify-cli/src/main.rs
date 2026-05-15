@@ -1,10 +1,11 @@
 // Rust guideline compliant 2026-02-21
-//! Standalone offline verifier CLI over [`integrity_verify::verify_universal`].
+//! Standalone offline verifier CLI over universal and Trellis/WOS export checks.
 //!
 //! Per the signature-wire convergence plan §12 O-4 + E-10, the verifier ships
 //! as a distinct binary deliverable handed to judges, regulators, and partner
-//! institutions. `trellis-cli` remains for envelope-only fixture operations;
-//! this CLI is the general `verify <bundle.zip>` entrypoint.
+//! institutions. The generic `verify <bundle.zip>` command runs the universal
+//! phase only; `verify-export <bundle.zip>` runs the production Trellis/WOS
+//! export verifier.
 //!
 //! ## Bundle layout convention
 //!
@@ -19,10 +20,9 @@
 
 use std::process::ExitCode;
 
-use integrity_verify::{ProfileRegistry, WOS_PROFILE_ID};
+use integrity_verify::ProfileRegistry;
 
 mod cli;
-mod profile;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -38,19 +38,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Default profile registry constructor. Registers a permissive WOS profile
-/// stub keyed by [`WOS_PROFILE_ID`] so envelopes carrying that profile route
-/// to a verifier without forcing the CLI to ship the full WOS plugin yet.
-///
-/// **Scope note:** 4A.1 establishes the binary surface; the production WOS
-/// `ProfileVerifier` lands when `trellis-verify-wos` is lifted into the
-/// `integrity-stack/` profile-plugin tree. Until then, the registry routes
-/// `WOS_PROFILE_ID` to a "structural ack" verifier and registers a default
-/// route for envelopes that omit `profile_id`.
 fn default_registry(profile_id: Option<u64>) -> ProfileRegistry {
-    let mut registry = ProfileRegistry::new();
-    let target = profile_id.unwrap_or(WOS_PROFILE_ID);
-    registry.register(Box::new(profile::StructuralAckProfile::new(target)));
-    registry.register_default(Box::new(profile::StructuralAckProfile::new(0)));
-    registry
+    let _ = profile_id;
+    ProfileRegistry::new()
 }
