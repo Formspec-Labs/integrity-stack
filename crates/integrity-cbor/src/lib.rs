@@ -50,8 +50,8 @@ pub enum JsonCborError {
     Oversized { actual: usize, max: usize },
     /// A JSON number is outside the supported signed 64-bit range.
     IntegerOutOfRange,
-    /// A JSON number is not finite.
-    NonFiniteFloat,
+    /// A floating-point value is not admissible for deterministic JSON↔dCBOR (non-finite or `-0.0`).
+    FloatNotDcborCanonical,
     /// A CBOR value cannot be represented by the JSON inspection view.
     UnsupportedCbor(String),
 }
@@ -70,9 +70,9 @@ impl fmt::Display for JsonCborError {
                     "JSON integer is outside the supported signed 64-bit range"
                 )
             }
-            Self::NonFiniteFloat => write!(
+            Self::FloatNotDcborCanonical => write!(
                 f,
-                "JSON floating-point values must be finite and use canonical +0 (not -0, NaN, or Infinity)"
+                "floating-point values must be finite and use canonical +0 (not -0, NaN, or Infinity)"
             ),
             Self::UnsupportedCbor(message) => write!(f, "unsupported CBOR content: {message}"),
         }
@@ -220,11 +220,12 @@ pub fn dcbor_bytes_to_json(bytes: &[u8]) -> Result<serde_json::Value, JsonCborEr
 ///
 /// # Errors
 /// Returns an error for non-text map keys, unsupported tags, unsupported
-/// simple values, or integers outside signed 64-bit range.
+/// simple values, integers outside signed 64-bit range, non-finite floats,
+/// or float negative zero (`-0.0`), matching deterministic JSON→dCBOR rules.
 #[cfg(feature = "json")]
 pub fn cbor_value_to_json(value: &Value) -> Result<serde_json::Value, JsonCborError> {
-    use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
 
     match value {
         Value::Null => Ok(serde_json::Value::Null),
@@ -236,9 +237,7 @@ pub fn cbor_value_to_json(value: &Value) -> Result<serde_json::Value, JsonCborEr
             Ok(serde_json::json!(signed))
         }
         Value::Float(value) => {
-            if !value.is_finite() {
-                return Err(JsonCborError::NonFiniteFloat);
-            }
+            let value = validate_json_f64_for_dcbor(*value)?;
             Ok(serde_json::json!(value))
         }
         Value::Text(value) => Ok(serde_json::Value::String(value.clone())),
@@ -272,20 +271,20 @@ pub fn cbor_value_to_json(value: &Value) -> Result<serde_json::Value, JsonCborEr
     }
 }
 
-/// Returns `value` when it is allowed in deterministic JSON→dCBOR encoding.
+/// Returns `value` when it is allowed in deterministic JSON↔dCBOR float rules.
 ///
-/// Rejects non-finite floats and `-0.0` so encoded CBOR floats have a single
-/// canonical zero representation. Used by [`json_to_cbor_value`] before any
-/// CBOR bytes are written in [`json_to_dcbor_bytes`].
+/// Rejects non-finite floats and `-0.0` so CBOR floats have a single canonical
+/// zero representation. Used by [`json_to_cbor_value`] / [`json_to_dcbor_bytes`]
+/// and by [`cbor_value_to_json`] (including [`dcbor_bytes_to_json`]).
 #[cfg(feature = "json")]
 pub(crate) fn validate_json_f64_for_dcbor(value: f64) -> Result<f64, JsonCborError> {
     if !value.is_finite() {
-        return Err(JsonCborError::NonFiniteFloat);
+        return Err(JsonCborError::FloatNotDcborCanonical);
     }
     // IEEE +0 and -0 compare equal but have distinct encodings; reject -0 for dCBOR stability.
     let pos_zero = 0.0_f64;
     if value == pos_zero && value.to_bits() != pos_zero.to_bits() {
-        return Err(JsonCborError::NonFiniteFloat);
+        return Err(JsonCborError::FloatNotDcborCanonical);
     }
     Ok(value)
 }
@@ -609,8 +608,9 @@ mod tests {
 
     #[cfg(feature = "json")]
     use super::{
-        JsonCborError, Value, cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
+        cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
         json_to_dcbor_bytes_with_limit, map_lookup_value, validate_json_f64_for_dcbor,
+        JsonCborError, Value,
     };
     use super::{
         decode_cbor_value, domain_separated_sha256, encode_bstr, encode_cbor_negative_int,
@@ -760,50 +760,65 @@ mod tests {
 
     #[cfg(feature = "json")]
     #[test]
+    fn json_dcbor_bytes_roundtrip_preserves_finite_floats() {
+        let value = serde_json::json!({
+            "zero": 0.0,
+            "pi": 3.141592653589793,
+            "nested": { "x": 1.25 },
+        });
+        let bytes = json_to_dcbor_bytes(&value, &[]).expect("encode dcbor");
+        let decoded = super::dcbor_bytes_to_json(&bytes).expect("decode json view");
+
+        assert_eq!(decoded, value);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
     fn cbor_to_json_rejects_non_finite_floats() {
         let error = cbor_value_to_json(&Value::Float(f64::NAN)).expect_err("reject nan");
 
-        assert_eq!(error, JsonCborError::NonFiniteFloat);
+        assert_eq!(error, JsonCborError::FloatNotDcborCanonical);
     }
 
     // serde_json::Value cannot represent non-finite f64 as Value::Number (Number::from_f64 returns None).
-    // validate_json_f64_for_dcbor is the shared gate used by json_to_cbor_value / json_to_dcbor_bytes.
+    // validate_json_f64_for_dcbor is the shared gate used by json_to_cbor_value / json_to_dcbor_bytes
+    // and cbor_value_to_json / dcbor_bytes_to_json.
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_nan_when_validate_json_f64_for_dcbor_then_rejects_with_non_finite_float_error() {
+    fn given_f64_nan_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical() {
         assert_eq!(
             validate_json_f64_for_dcbor(f64::NAN),
-            Err(JsonCborError::NonFiniteFloat)
+            Err(JsonCborError::FloatNotDcborCanonical)
         );
     }
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_positive_infinity_when_validate_json_f64_for_dcbor_then_rejects_with_non_finite_float_error()
-     {
+    fn given_f64_positive_infinity_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical(
+    ) {
         assert_eq!(
             validate_json_f64_for_dcbor(f64::INFINITY),
-            Err(JsonCborError::NonFiniteFloat)
+            Err(JsonCborError::FloatNotDcborCanonical)
         );
     }
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_negative_infinity_when_validate_json_f64_for_dcbor_then_rejects_with_non_finite_float_error()
-     {
+    fn given_f64_negative_infinity_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical(
+    ) {
         assert_eq!(
             validate_json_f64_for_dcbor(f64::NEG_INFINITY),
-            Err(JsonCborError::NonFiniteFloat)
+            Err(JsonCborError::FloatNotDcborCanonical)
         );
     }
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_negative_zero_when_validate_json_f64_for_dcbor_then_rejects_with_non_finite_float_error()
-     {
+    fn given_f64_negative_zero_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical(
+    ) {
         assert_eq!(
             validate_json_f64_for_dcbor(-0.0),
-            Err(JsonCborError::NonFiniteFloat)
+            Err(JsonCborError::FloatNotDcborCanonical)
         );
     }
 
@@ -816,12 +831,21 @@ mod tests {
     // Full JSON→dCBOR pipeline: failure before ciborium emits bytes.
     #[cfg(feature = "json")]
     #[test]
-    fn given_json_negative_zero_when_json_to_dcbor_bytes_then_rejects_with_non_finite_float_error()
-    {
+    fn given_json_negative_zero_when_json_to_dcbor_bytes_then_rejects_float_not_dcbor_canonical() {
         let value =
             serde_json::Value::Number(serde_json::Number::from_f64(-0.0).expect("-0 is finite"));
         let error = json_to_dcbor_bytes(&value, &[]).expect_err("negative zero must reject");
 
-        assert_eq!(error, JsonCborError::NonFiniteFloat);
+        assert_eq!(error, JsonCborError::FloatNotDcborCanonical);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn given_cbor_float_negative_zero_when_cbor_value_to_json_then_rejects_float_not_dcbor_canonical(
+    ) {
+        assert_eq!(
+            cbor_value_to_json(&Value::Float(-0.0)),
+            Err(JsonCborError::FloatNotDcborCanonical)
+        );
     }
 }
