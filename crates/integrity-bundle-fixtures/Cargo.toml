@@ -1,0 +1,16 @@
+[package]
+name = "integrity-bundle-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared cross-stack fixture bundle manifest walker"
+repository = "https://github.com/Formspec-org/formspec-stack"
+
+[dependencies]
+jsonschema = { version = "0.45", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

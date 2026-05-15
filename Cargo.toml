@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/integrity-bundle",
+    "crates/integrity-bundle-fixtures",
     "crates/integrity-canonical",
     "crates/integrity-cbor",
     "crates/integrity-cose",
