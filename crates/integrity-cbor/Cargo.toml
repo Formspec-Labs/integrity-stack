@@ -6,8 +6,11 @@ license.workspace = true
 
 [features]
 default = ["std"]
-std = ["ciborium/std", "sha2/std"]
+json = ["dep:base64", "dep:serde_json", "base64/alloc", "serde_json/alloc"]
+std = ["ciborium/std", "sha2/std", "base64?/std", "serde_json?/std"]
 
 [dependencies]
+base64 = { version = "0.22", default-features = false, optional = true }
 ciborium = { version = "0.2", default-features = false }
+serde_json = { version = "1", default-features = false, optional = true }
 sha2 = { version = "0.10", default-features = false }

@@ -12,8 +12,12 @@
 extern crate alloc;
 
 use alloc::borrow::ToOwned;
+#[cfg(feature = "json")]
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+#[cfg(feature = "json")]
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -35,6 +39,45 @@ impl fmt::Display for CborHelperError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for CborHelperError {}
+
+/// Error returned by JSON/dCBOR conversion helpers.
+#[cfg(feature = "json")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JsonCborError {
+    /// CBOR encoding or decoding failed.
+    Cbor(String),
+    /// The encoded CBOR record exceeded the caller's inline byte posture.
+    Oversized { actual: usize, max: usize },
+    /// A JSON number is outside the supported signed 64-bit range.
+    IntegerOutOfRange,
+    /// A JSON number is not finite.
+    NonFiniteFloat,
+    /// A CBOR value cannot be represented by the JSON inspection view.
+    UnsupportedCbor(String),
+}
+
+#[cfg(feature = "json")]
+impl fmt::Display for JsonCborError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cbor(message) => write!(f, "{message}"),
+            Self::Oversized { actual, max } => {
+                write!(f, "encoded CBOR exceeds byte limit: {actual} > {max}")
+            }
+            Self::IntegerOutOfRange => {
+                write!(
+                    f,
+                    "JSON integer is outside the supported signed 64-bit range"
+                )
+            }
+            Self::NonFiniteFloat => write!(f, "JSON numbers must be finite"),
+            Self::UnsupportedCbor(message) => write!(f, "unsupported CBOR content: {message}"),
+        }
+    }
+}
+
+#[cfg(all(feature = "json", feature = "std"))]
+impl std::error::Error for JsonCborError {}
 
 /// Encodes a CBOR byte string.
 #[must_use]
@@ -102,6 +145,196 @@ pub fn decode_cbor_value(bytes: &[u8]) -> Result<Value, CborHelperError> {
         ));
     }
     Ok(value)
+}
+
+/// Encodes JSON into deterministic CBOR bytes.
+///
+/// Object entries are sorted by their encoded CBOR key bytes. Text strings at
+/// paths listed in `string_tags` are wrapped in the corresponding CBOR tag.
+///
+/// # Errors
+/// Returns an error when JSON numbers cannot be represented or CBOR encoding
+/// fails.
+#[cfg(feature = "json")]
+pub fn json_to_dcbor_bytes(
+    value: &serde_json::Value,
+    string_tags: &[(Vec<String>, u64)],
+) -> Result<Vec<u8>, JsonCborError> {
+    let cbor = json_to_cbor_value(value, string_tags)?;
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&cbor, &mut bytes)
+        .map_err(|error| JsonCborError::Cbor(error.to_string()))?;
+    Ok(bytes)
+}
+
+/// Encodes JSON into deterministic CBOR bytes within `max_bytes`.
+///
+/// # Errors
+/// Returns [`JsonCborError::Oversized`] when encoded output exceeds the byte
+/// limit, or another conversion error when JSON cannot be encoded.
+#[cfg(feature = "json")]
+pub fn json_to_dcbor_bytes_with_limit(
+    value: &serde_json::Value,
+    max_bytes: usize,
+    string_tags: &[(Vec<String>, u64)],
+) -> Result<Vec<u8>, JsonCborError> {
+    let bytes = json_to_dcbor_bytes(value, string_tags)?;
+    if bytes.len() > max_bytes {
+        return Err(JsonCborError::Oversized {
+            actual: bytes.len(),
+            max: max_bytes,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Converts JSON into a CBOR value using deterministic map ordering.
+///
+/// # Errors
+/// Returns an error when JSON numbers cannot be represented.
+#[cfg(feature = "json")]
+pub fn json_to_cbor_value(
+    value: &serde_json::Value,
+    string_tags: &[(Vec<String>, u64)],
+) -> Result<Value, JsonCborError> {
+    json_to_cbor_value_at_path(value, &mut Vec::new(), string_tags)
+}
+
+/// Decodes deterministic CBOR bytes into a JSON inspection view.
+///
+/// CBOR byte strings become base64 strings. CBOR tag 0 and 32 wrappers are
+/// removed and their inner value is rendered.
+///
+/// # Errors
+/// Returns an error when bytes are invalid CBOR or contain unsupported values.
+#[cfg(feature = "json")]
+pub fn dcbor_bytes_to_json(bytes: &[u8]) -> Result<serde_json::Value, JsonCborError> {
+    let decoded = decode_cbor_value(bytes).map_err(|error| JsonCborError::Cbor(error.0))?;
+    cbor_value_to_json(&decoded)
+}
+
+/// Converts a CBOR value into a JSON inspection view.
+///
+/// # Errors
+/// Returns an error for non-text map keys, unsupported tags, unsupported
+/// simple values, or integers outside signed 64-bit range.
+#[cfg(feature = "json")]
+pub fn cbor_value_to_json(value: &Value) -> Result<serde_json::Value, JsonCborError> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    match value {
+        Value::Null => Ok(serde_json::Value::Null),
+        Value::Bool(value) => Ok(serde_json::Value::Bool(*value)),
+        Value::Integer(value) => {
+            let signed = i64::try_from(*value).map_err(|_| {
+                JsonCborError::UnsupportedCbor("integer outside signed 64-bit range".to_string())
+            })?;
+            Ok(serde_json::json!(signed))
+        }
+        Value::Float(value) => {
+            if !value.is_finite() {
+                return Err(JsonCborError::NonFiniteFloat);
+            }
+            Ok(serde_json::json!(value))
+        }
+        Value::Text(value) => Ok(serde_json::Value::String(value.clone())),
+        Value::Bytes(value) => Ok(serde_json::Value::String(STANDARD.encode(value))),
+        Value::Array(items) => {
+            let mut decoded = Vec::with_capacity(items.len());
+            for item in items {
+                decoded.push(cbor_value_to_json(item)?);
+            }
+            Ok(serde_json::Value::Array(decoded))
+        }
+        Value::Map(entries) => {
+            let mut decoded = serde_json::Map::with_capacity(entries.len());
+            for (key, value) in entries {
+                let Value::Text(key) = key else {
+                    return Err(JsonCborError::UnsupportedCbor(
+                        "non-text map key".to_string(),
+                    ));
+                };
+                decoded.insert(key.clone(), cbor_value_to_json(value)?);
+            }
+            Ok(serde_json::Value::Object(decoded))
+        }
+        Value::Tag(0 | 32, inner) => cbor_value_to_json(inner),
+        Value::Tag(tag, _) => Err(JsonCborError::UnsupportedCbor(format!(
+            "unsupported CBOR tag {tag}"
+        ))),
+        other => Err(JsonCborError::UnsupportedCbor(format!(
+            "unsupported CBOR value {other:?}"
+        ))),
+    }
+}
+
+#[cfg(feature = "json")]
+fn json_to_cbor_value_at_path(
+    value: &serde_json::Value,
+    path: &mut Vec<String>,
+    string_tags: &[(Vec<String>, u64)],
+) -> Result<Value, JsonCborError> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
+        serde_json::Value::String(value) => {
+            if let Some((_, tag)) = string_tags.iter().find(|(tag_path, _)| tag_path == path) {
+                Ok(Value::Tag(*tag, Box::new(Value::Text(value.clone()))))
+            } else {
+                Ok(Value::Text(value.clone()))
+            }
+        }
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Ok(Value::Integer(integer.into()))
+            } else if let Some(unsigned) = number.as_u64() {
+                let integer =
+                    i64::try_from(unsigned).map_err(|_| JsonCborError::IntegerOutOfRange)?;
+                Ok(Value::Integer(integer.into()))
+            } else if let Some(float) = number.as_f64() {
+                if !float.is_finite() {
+                    return Err(JsonCborError::NonFiniteFloat);
+                }
+                Ok(Value::Float(float))
+            } else {
+                Err(JsonCborError::IntegerOutOfRange)
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let mut encoded = Vec::with_capacity(items.len());
+            for item in items {
+                encoded.push(json_to_cbor_value_at_path(item, path, string_tags)?);
+            }
+            Ok(Value::Array(encoded))
+        }
+        serde_json::Value::Object(object) => {
+            let mut entries = Vec::with_capacity(object.len());
+            for (key, item) in object {
+                path.push(key.clone());
+                let key_value = Value::Text(key.clone());
+                let value = json_to_cbor_value_at_path(item, path, string_tags)?;
+                path.pop();
+                let key_bytes = encoded_cbor_key_bytes(&key_value)?;
+                entries.push((key_bytes, key_value, value));
+            }
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(Value::Map(
+                entries
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "json")]
+fn encoded_cbor_key_bytes(value: &Value) -> Result<Vec<u8>, JsonCborError> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|error| JsonCborError::Cbor(error.to_string()))?;
+    Ok(bytes)
 }
 
 /// Performs a case-sensitive map lookup for a text key.
@@ -349,6 +582,18 @@ fn encode_major_len(major: u8, value: u64) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "json")]
+    use alloc::borrow::ToOwned;
+    use alloc::string::ToString;
+    use alloc::vec;
+    #[cfg(feature = "json")]
+    use alloc::vec::Vec;
+
+    #[cfg(feature = "json")]
+    use super::{
+        JsonCborError, Value, cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
+        json_to_dcbor_bytes_with_limit, map_lookup_value,
+    };
     use super::{
         decode_cbor_value, domain_separated_sha256, encode_bstr, encode_cbor_negative_int,
         encode_tstr, encode_uint, map_lookup_fixed_bytes, map_lookup_text, map_lookup_u64,
@@ -423,5 +668,83 @@ mod tests {
         let second = domain_separated_sha256("second", b"payload");
 
         assert_ne!(first, second);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_to_cbor_uses_dcbor_map_key_order() {
+        let value = serde_json::json!({
+            "aa": 1,
+            "b": 2,
+        });
+        let encoded = json_to_cbor_value(&value, &[]).expect("json to cbor");
+        let map = encoded.as_map().expect("map");
+        let keys = map
+            .iter()
+            .map(|(key, _)| key.as_text().expect("text key"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["b", "aa"]);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_to_cbor_applies_path_string_tags() {
+        let value = serde_json::json!({
+            "event": {
+                "timestamp": "2026-05-15T00:00:00Z",
+            },
+        });
+        let tags = [(vec!["event".to_owned(), "timestamp".to_owned()], 0)];
+        let encoded = json_to_cbor_value(&value, &tags).expect("json to cbor");
+        let event = map_lookup_value(encoded.as_map().expect("root map"), "event")
+            .expect("event map")
+            .as_map()
+            .expect("event map");
+        let timestamp = map_lookup_value(event, "timestamp").expect("timestamp");
+
+        assert!(
+            matches!(timestamp, Value::Tag(0, inner) if inner.as_text() == Some("2026-05-15T00:00:00Z"))
+        );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_dcbor_bytes_roundtrip_to_json_view() {
+        let value = serde_json::json!({
+            "timestamp": "2026-05-15T00:00:00Z",
+            "count": 3,
+        });
+        let tags = [(vec!["timestamp".to_owned()], 0)];
+        let bytes = json_to_dcbor_bytes(&value, &tags).expect("encode dcbor");
+        let decoded = super::dcbor_bytes_to_json(&bytes).expect("decode json view");
+
+        assert_eq!(decoded, value);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_dcbor_limit_reports_encoded_size() {
+        let error =
+            json_to_dcbor_bytes_with_limit(&serde_json::json!({ "blob": "abcdef" }), 1, &[])
+                .expect_err("oversize");
+
+        assert!(matches!(error, JsonCborError::Oversized { actual, max: 1 } if actual > 1));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn cbor_bytes_decode_to_base64_json_string() {
+        let value = cbor_value_to_json(&Value::Bytes(vec![1, 2, 3])).expect("json view");
+
+        assert_eq!(value, serde_json::json!("AQID"));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn cbor_to_json_rejects_non_finite_floats() {
+        let error = cbor_value_to_json(&Value::Float(f64::NAN)).expect_err("reject nan");
+
+        assert_eq!(error, JsonCborError::NonFiniteFloat);
     }
 }
