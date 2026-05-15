@@ -23,7 +23,6 @@ use integrity_verify::{ProfileRegistry, WOS_PROFILE_ID};
 
 mod cli;
 mod profile;
-mod zip_reader;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();

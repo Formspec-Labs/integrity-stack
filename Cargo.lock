@@ -662,12 +662,12 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "ed25519-dalek",
+ "integrity-bundle",
  "integrity-canonical",
  "integrity-cose",
  "serde_json",
  "trellis-cose",
  "trellis-types",
- "zip",
 ]
 
 [[package]]

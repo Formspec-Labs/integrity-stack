@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Cursor;
 
+use integrity_bundle::read_stored_zip;
 use trellis_types::{
     checkpoint_digest, map_lookup_array, map_lookup_bytes, map_lookup_fixed_bytes,
     map_lookup_optional_map, map_lookup_u64, sha256_bytes,
 };
-use zip::ZipArchive;
 
 use super::{
     ALG_EDDSA, SUITE_ID_PHASE_1_I128, attachment_entry_matches_binding,
@@ -985,24 +984,16 @@ pub(crate) fn export_archive_for_tests(members: BTreeMap<String, Vec<u8>>) -> Ex
 /// entries, extra leading segments, or nested roots are rejected so member
 /// paths stay stable across toolchains.
 pub(crate) fn parse_export_zip(bytes: &[u8]) -> Result<ExportArchive, VerifyError> {
-    let mut archive = ZipArchive::new(Cursor::new(bytes))
-        .map_err(|error| VerifyError::new(format!("failed to parse ZIP: {error}")))?;
     let mut members = BTreeMap::new();
-    for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .map_err(|error| VerifyError::new(format!("failed to read ZIP member: {error}")))?;
-        let name = file.name().to_string();
-        let Some((_, relative_name)) = name.split_once('/') else {
+    for entry in read_stored_zip(bytes)
+        .map_err(|error| VerifyError::new(format!("failed to parse ZIP: {error}")))?
+    {
+        let Some((_, relative_name)) = entry.path().split_once('/') else {
             return Err(VerifyError::new(
                 "ZIP member does not live under one export root",
             ));
         };
-        let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut data).map_err(|error| {
-            VerifyError::new(format!("failed to read ZIP member bytes: {error}"))
-        })?;
-        members.insert(relative_name.to_string(), data);
+        members.insert(relative_name.to_string(), entry.bytes().to_vec());
     }
     Ok(ExportArchive { members })
 }

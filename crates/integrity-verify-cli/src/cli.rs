@@ -9,13 +9,12 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+use integrity_bundle::{BundleEntry, read_stored_zip};
 use integrity_cose::decode_cose_sign1;
 use integrity_verify::{
     BundleEntryView, ProfileRegistry, SubstrateTier, VerificationReport, VerifyBundleInput,
     VerifyEvent, verify_universal,
 };
-
-use crate::zip_reader::{ZipEntry, read_stored_zip};
 
 /// Output format selector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,15 +165,13 @@ fn verify_command(
 
     let bundle_views: Vec<BundleEntryView<'_>> = entries
         .iter()
-        .map(|entry| BundleEntryView {
-            path: entry.path.as_str(),
-        })
+        .map(|entry| BundleEntryView { path: entry.path() })
         .collect();
 
     let verify_events: Vec<VerifyEvent<'_>> = event_indices
         .iter()
         .map(|&i| VerifyEvent {
-            sign1_bytes: entries[i].bytes.as_slice(),
+            sign1_bytes: entries[i].bytes(),
             public_key: None,
             detached_payload: None,
         })
@@ -229,17 +226,17 @@ fn stdout_err(error: std::io::Error) -> String {
     format!("failed to write to stdout: {error}")
 }
 
-fn is_candidate_event(entry: &ZipEntry) -> bool {
-    if !entry.path.ends_with(".cbor") {
+fn is_candidate_event(entry: &BundleEntry) -> bool {
+    if !entry.path().ends_with(".cbor") {
         return false;
     }
-    decode_cose_sign1(&entry.bytes).is_ok()
+    decode_cose_sign1(entry.bytes()).is_ok()
 }
 
 fn render_text(
     report: &VerificationReport,
     event_indices: &[usize],
-    entries: &[ZipEntry],
+    entries: &[BundleEntry],
 ) -> String {
     let tier = report
         .substrate_tier
