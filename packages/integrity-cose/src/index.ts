@@ -4,6 +4,14 @@ export const COSE_LABEL_ALG = 1;
 export const COSE_LABEL_KID = 4;
 export const COSE_LABEL_SUITE_ID = -65_537;
 export const COSE_LABEL_PROFILE_ID = -65_539;
+/**
+ * Consumer detached-signature `method_uri` protected-header label (ADR 0109).
+ *
+ * Carries a URI-shaped tstr that selects the consumer adapter via prefix
+ * lookup → exact-value check. Lives in `integrity-cose` per ADR 0109 §Registry;
+ * Trellis substrate envelopes never carry it.
+ */
+export const COSE_LABEL_METHOD_URI = -65_540;
 export const COSE_SIGN1_TAG = 18;
 export const SUITE_ID_PHASE_1 = 1;
 export const WOS_PROFILE_ID = 1;
@@ -19,6 +27,12 @@ export interface CoseSign1 {
   kid: Uint8Array | null;
   suiteId: number | null;
   profileId: number | null;
+  /**
+   * Consumer detached-signature method URI (COSE label `-65540`, ADR 0109).
+   * `null` on substrate envelopes (which never carry it) and on legacy
+   * profile_id-bearing envelopes that pre-date the surface split.
+   */
+  methodUri: string | null;
 }
 
 export class CoseError extends Error {
@@ -82,7 +96,52 @@ export function decodeCoseSign1(bytes: Uint8Array): CoseSign1 {
     kid: optionalBytesLabel(protectedHeaderValue, COSE_LABEL_KID),
     suiteId: optionalUnsignedIntegerLabel(protectedHeaderValue, COSE_LABEL_SUITE_ID),
     profileId: optionalUnsignedIntegerLabel(protectedHeaderValue, COSE_LABEL_PROFILE_ID),
+    methodUri: optionalTextLabel(protectedHeaderValue, COSE_LABEL_METHOD_URI),
   };
+}
+
+/**
+ * Decodes a consumer detached-signature envelope (ADR 0109) and validates that
+ * the protected-header `method_uri` value starts with `expectedPrefix`.
+ *
+ * Mirrors `formspec_signature_cose::decode_cose_sign1_with_method_uri` in
+ * Rust — same prefix-validating discipline, same error shapes. Caller-side
+ * dispatch (which adapter to invoke) routes on the URI prefix; this primitive
+ * is the byte-level gate that proves the envelope claims a prefix the caller
+ * is willing to verify, before any signature primitive runs.
+ *
+ * @throws {CoseError} when COSE decoding fails, when `method_uri` is absent
+ * (label `-65540` missing from the protected header), or when the URI value
+ * does not start with `expectedPrefix`.
+ */
+export function decodeCoseSign1WithMethodUri(
+  bytes: Uint8Array,
+  expectedPrefix: string,
+): { cose: CoseSign1; methodUri: string } {
+  const cose = decodeCoseSign1(bytes);
+  if (cose.methodUri === null) {
+    throw new CoseError(
+      `missing method_uri protected header (label ${COSE_LABEL_METHOD_URI})`,
+    );
+  }
+  if (!cose.methodUri.startsWith(expectedPrefix)) {
+    throw new CoseError(
+      `method_uri ${JSON.stringify(cose.methodUri)} does not match expected prefix ${JSON.stringify(expectedPrefix)}`,
+    );
+  }
+  return { cose, methodUri: cose.methodUri };
+}
+
+/**
+ * Returns the `method_uri` value from a consumer detached-signature envelope
+ * (ADR 0109), validated against `expectedPrefix`. Routing / inspection
+ * shortcut over {@link decodeCoseSign1WithMethodUri}.
+ *
+ * @throws {CoseError} under the same conditions as
+ * {@link decodeCoseSign1WithMethodUri}.
+ */
+export function extractMethodUri(bytes: Uint8Array, expectedPrefix: string): string {
+  return decodeCoseSign1WithMethodUri(bytes, expectedPrefix).methodUri;
 }
 
 export function decodeCoseSign1WithProfileId(
@@ -160,6 +219,35 @@ export function protectedHeaderBytesForAlgWithProfileId(
 
 export function protectedHeaderBytesForFormspec(alg: number, kid?: Uint8Array): Uint8Array {
   return protectedHeaderBytesForAlgWithProfileId(alg, kid, FORMSPEC_PROFILE_ID);
+}
+
+/**
+ * Consumer detached-signature protected-header builder (ADR 0109).
+ *
+ * Emits a `MAP_3` with `alg` (label 1), `kid` (label 4), and `method_uri`
+ * (label `-65540`). The `method_uri` value is a URI-shaped tstr; callers
+ * select the consumer subspace by choosing the URI prefix
+ * (`urn:formspec:sig-method:*`, `urn:formspec:receipt-method:*`, ...). This
+ * helper does not enforce the prefix — verifiers reject values outside the
+ * expected prefix via {@link decodeCoseSign1WithMethodUri}.
+ *
+ * Mirrors `integrity_cose::detached_signature_protected_header` in Rust;
+ * cross-runtime byte-for-byte parity with the ring adapter's golden vectors.
+ */
+export function detachedSignatureProtectedHeader(
+  alg: number,
+  kid: Uint8Array,
+  methodUri: string,
+): Uint8Array {
+  return concatBytes(
+    encodeMajorLen(5, 3),
+    encodeInt(COSE_LABEL_ALG),
+    encodeInt(alg),
+    encodeInt(COSE_LABEL_KID),
+    encodeBytes(kid),
+    encodeInt(COSE_LABEL_METHOD_URI),
+    encodeText(methodUri),
+  );
 }
 
 export function protectedHeaderBytesWithSuiteId(
@@ -258,6 +346,17 @@ function optionalBytesLabel(map: Map<CborValue, CborValue>, label: number): Uint
   }
   if (!(value instanceof Uint8Array)) {
     throw new CoseError(`COSE label ${label} is not bytes`);
+  }
+  return value;
+}
+
+function optionalTextLabel(map: Map<CborValue, CborValue>, label: number): string | null {
+  const value = map.get(label);
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value !== 'string') {
+    throw new CoseError(`COSE label ${label} is not a text string`);
   }
   return value;
 }

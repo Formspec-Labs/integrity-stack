@@ -1,13 +1,17 @@
 /** @filedesc Unit tests for the TypeScript integrity COSE package. */
 import { describe, expect, it } from 'vitest';
 import {
+  COSE_LABEL_METHOD_URI,
   COSE_LABEL_PROFILE_ID,
   FORMSPEC_PROFILE_ID,
   WOS_PROFILE_ID,
   decodeCoseSign1,
+  decodeCoseSign1WithMethodUri,
   decodeFormspecCoseSign1,
   deriveKid,
+  detachedSignatureProtectedHeader,
   encodeCoseSign1,
+  extractMethodUri,
   protectedHeaderBytesForAlg,
   protectedHeaderBytesForAlgWithProfileId,
   protectedHeaderBytesForFormspec,
@@ -109,5 +113,109 @@ describe('COSE_Sign1 helpers', () => {
       0xc2, 0xad, 0x0a, 0x99, 0x77, 0x51, 0xe0, 0x40, 0x66, 0x91, 0x2f, 0xa4,
       0x90, 0xa9, 0x97, 0x6d,
     ]);
+  });
+});
+
+describe('consumer detached-signature envelopes (ADR 0109)', () => {
+  const SIG_METHOD_URI = 'urn:formspec:sig-method:ed25519-cose-sign1@1';
+  const RECEIPT_METHOD_URI = 'urn:formspec:receipt-method:ed25519-cose-sign1@1';
+  const SIG_PREFIX = 'urn:formspec:sig-method:';
+  const RECEIPT_PREFIX = 'urn:formspec:receipt-method:';
+
+  it('emits MAP_3 with alg, kid, and method_uri at label -65540', () => {
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x33),
+      SIG_METHOD_URI,
+    );
+
+    // 0xa3 = MAP_3, then alg(1)=-8 -> 01 27, kid label 04, bstr-16, 16 kid bytes
+    expect(protectedHeader[0]).toBe(0xa3);
+    expect(Array.from(protectedHeader.slice(1, 3))).toEqual([0x01, 0x27]);
+    expect(Array.from(protectedHeader.slice(3, 5))).toEqual([0x04, 0x50]);
+    expect(Array.from(protectedHeader.slice(21, 26))).toEqual([0x3a, 0x00, 0x01, 0x00, 0x03]);
+    // tstr header for SIG_METHOD_URI (length 44 -> 0x78 0x2c)
+    expect(Array.from(protectedHeader.slice(26, 28))).toEqual([0x78, 0x2c]);
+    const decoded = new TextDecoder().decode(protectedHeader.slice(28));
+    expect(decoded).toBe(SIG_METHOD_URI);
+  });
+
+  it('round-trips through decodeCoseSign1, surfacing methodUri', () => {
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x44),
+      RECEIPT_METHOD_URI,
+    );
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64).fill(7));
+
+    const decoded = decodeCoseSign1(encoded);
+
+    expect(decoded.alg).toBe(-8);
+    expect(decoded.kid).toEqual(new Uint8Array(16).fill(0x44));
+    expect(decoded.methodUri).toBe(RECEIPT_METHOD_URI);
+    expect(decoded.profileId).toBeNull();
+    expect(decoded.suiteId).toBeNull();
+  });
+
+  it('decodeCoseSign1WithMethodUri accepts an envelope whose URI matches the expected prefix', () => {
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x55),
+      SIG_METHOD_URI,
+    );
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    const { cose, methodUri } = decodeCoseSign1WithMethodUri(encoded, SIG_PREFIX);
+
+    expect(methodUri).toBe(SIG_METHOD_URI);
+    expect(cose.methodUri).toBe(SIG_METHOD_URI);
+  });
+
+  it('decodeCoseSign1WithMethodUri rejects envelopes missing method_uri', () => {
+    // Legacy alg-only header (label 1 only) — no method_uri at -65540.
+    const protectedHeader = protectedHeaderBytesForAlg(-8, new Uint8Array([0xAA]));
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    expect(() => decodeCoseSign1WithMethodUri(encoded, SIG_PREFIX)).toThrow(
+      new RegExp(`missing method_uri protected header \\(label ${COSE_LABEL_METHOD_URI}\\)`),
+    );
+  });
+
+  it('decodeCoseSign1WithMethodUri rejects cross-domain prefix swap (sig-method routed as receipt-method)', () => {
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x66),
+      SIG_METHOD_URI,
+    );
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    expect(() => decodeCoseSign1WithMethodUri(encoded, RECEIPT_PREFIX)).toThrow(
+      /does not match expected prefix/,
+    );
+  });
+
+  it('decodeCoseSign1WithMethodUri rejects cross-domain prefix swap (receipt-method routed as sig-method)', () => {
+    // Inverse check; both directions of the disjoint subspaces must reject.
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x77),
+      RECEIPT_METHOD_URI,
+    );
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    expect(() => decodeCoseSign1WithMethodUri(encoded, SIG_PREFIX)).toThrow(
+      /does not match expected prefix/,
+    );
+  });
+
+  it('extractMethodUri returns the URI value when prefix matches', () => {
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x88),
+      SIG_METHOD_URI,
+    );
+    const encoded = encodeCoseSign1(protectedHeader, new Uint8Array([1]), new Uint8Array(64));
+
+    expect(extractMethodUri(encoded, SIG_PREFIX)).toBe(SIG_METHOD_URI);
   });
 });
