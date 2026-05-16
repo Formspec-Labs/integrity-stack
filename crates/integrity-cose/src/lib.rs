@@ -997,6 +997,23 @@ mod tests {
     }
 
     #[test]
+    fn decode_protected_header_handles_legacy_substrate_map_3_shape() {
+        // Pre-ADR-0109 substrate envelopes (MAP_3 from `protected_header_bytes`)
+        // carry alg+kid+suite_id only — no `artifact_type`. During the migration
+        // window the partial-decode helper must accept these bytes and surface
+        // suite_id without artifact_type. After cutover, callers tighten the
+        // contract by requiring `artifact_type`.
+        let legacy = protected_header_bytes([0x11; 16]);
+        let header = decode_protected_header(&legacy).expect("decode legacy MAP_3 substrate");
+
+        assert_eq!(header.alg, -8);
+        assert_eq!(header.kid.as_deref(), Some(&[0x11u8; 16][..]));
+        assert_eq!(header.suite_id, Some(super::SUITE_ID_PHASE_1));
+        assert_eq!(header.artifact_type, None);
+        assert_eq!(header.method_uri, None);
+    }
+
+    #[test]
     fn substrate_and_consumer_headers_are_structurally_distinct() {
         let substrate = substrate_protected_header(-8, &[0xaa; 16], 1, "event");
         let consumer = detached_signature_protected_header(-8, &[0xaa; 16], "urn:x:y@1");
