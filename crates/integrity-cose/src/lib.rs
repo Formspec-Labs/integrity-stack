@@ -30,7 +30,30 @@ pub const COSE_LABEL_KID: i128 = 4;
 /// COSE protected-header label for an integrity profile suite.
 pub const COSE_LABEL_SUITE_ID: i128 = -65_537;
 /// COSE protected-header label for plugin profile dispatch.
+///
+/// **Retired by ADR 0109.** New envelopes MUST NOT carry this label.
+/// Decode helpers continue to read it during the migration window for
+/// backward compatibility with legacy envelopes; the allowance closes
+/// once all callers move to the post-ADR-0109 dispatch shape (see
+/// [`substrate_protected_header`] for substrate envelopes and
+/// [`detached_signature_protected_header`] for consumer detached-signature
+/// envelopes).
 pub const COSE_LABEL_PROFILE_ID: i128 = -65_539;
+/// COSE protected-header label for Trellis substrate `artifact_type` (ADR 0109).
+///
+/// Closed-enum tstr value: `"event"`, `"checkpoint"`, or `"manifest"`.
+/// Required on every Trellis substrate envelope post-ADR-0109. Trellis Core
+/// owns the value semantics; this crate owns the label number and the
+/// byte-level encoding.
+pub const COSE_LABEL_ARTIFACT_TYPE: i128 = -65_538;
+/// COSE protected-header label for consumer detached-signature `method_uri` (ADR 0109).
+///
+/// URI-shaped tstr value. The label is stack-shared; the URI prefixes are
+/// consumer-owned (Formspec defines `urn:formspec:sig-method:*` and
+/// `urn:formspec:receipt-method:*`; WOS reserves `urn:wos:attestation-method:*`).
+/// See `thoughts/registries/uri-prefix-coordination.md` at the stack root
+/// for the coordination mirror.
+pub const COSE_LABEL_METHOD_URI: i128 = -65_540;
 /// COSE_Sign1 CBOR tag.
 pub const COSE_SIGN1_TAG: u64 = 18;
 /// Phase-1 signature suite identifier used by current Trellis vectors.
@@ -40,6 +63,10 @@ pub const SUITE_ID_PHASE_1: u64 = 1;
 pub const COSE_SUITE_ID_LABEL_MAGNITUDE: u64 = 65_536;
 /// Unsigned magnitude for [`COSE_LABEL_PROFILE_ID`].
 pub const COSE_PROFILE_ID_LABEL_MAGNITUDE: u64 = 65_538;
+/// Unsigned magnitude for [`COSE_LABEL_ARTIFACT_TYPE`].
+pub const COSE_ARTIFACT_TYPE_LABEL_MAGNITUDE: u64 = 65_537;
+/// Unsigned magnitude for [`COSE_LABEL_METHOD_URI`].
+pub const COSE_METHOD_URI_LABEL_MAGNITUDE: u64 = 65_539;
 
 const CBOR_ARRAY_4: u8 = 0x84;
 const CBOR_EMPTY_BSTR: u8 = 0x40;
@@ -234,6 +261,73 @@ pub fn decode_cose_sign1_array(bytes: &[u8]) -> Result<Vec<CoseSign1>, CoseError
     items.iter().map(decode_cose_sign1_value).collect()
 }
 
+/// Decoded protected header for partial COSE_Sign1 inspection (ADR 0109).
+///
+/// Reads only the protected-header CBOR map; no payload decode, no signature
+/// primitive runs. Used by non-cryptographic tooling (lint rules, structural
+/// validators, registry-aware UIs) and by dispatch paths that route via
+/// `artifact_type` or `method_uri` before invoking the full verify path.
+///
+/// The populated fields discriminate envelope shape:
+/// - **Substrate envelope** (Trellis events/checkpoints/manifests): `suite_id`
+///   and `artifact_type` are present; `method_uri` is absent.
+/// - **Consumer detached-signature envelope** (Formspec authored signatures,
+///   verification receipts, future WOS attestations): `method_uri` is present;
+///   `suite_id` and `artifact_type` are absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedHeader {
+    /// COSE algorithm identifier. Required on every envelope.
+    pub alg: i128,
+    /// Key identifier bytes, when the envelope carries a `kid`.
+    pub kid: Option<Vec<u8>>,
+    /// Trellis suite identifier — populated for substrate envelopes.
+    pub suite_id: Option<u64>,
+    /// Substrate structural role tstr value — populated for substrate envelopes.
+    pub artifact_type: Option<String>,
+    /// Consumer-owned method URI — populated for consumer detached-signature envelopes.
+    pub method_uri: Option<String>,
+}
+
+/// Decodes the protected-header byte string of a COSE_Sign1 envelope (ADR 0109).
+///
+/// Reads only the protected-header map. Does not parse the full COSE_Sign1
+/// four-array, does not verify the signature, does not resolve the payload.
+/// Use this when routing/inspection needs to know the envelope shape (substrate
+/// vs consumer detached signature) before invoking the verify path.
+///
+/// `decode_cose_sign1` consumers continue to access protected-header fields
+/// via [`CoseSign1`]; this helper is the entry point for callers that only
+/// have the protected-header byte string in hand (e.g. signature adapters
+/// dispatching before decoding the full envelope).
+///
+/// # Errors
+/// Returns an error when bytes are not a CBOR map, when `alg` is absent or
+/// non-integer, when an integer label appears with the wrong value type, or
+/// when integer labels duplicate within the map.
+pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseError> {
+    let value = decode_cbor_value(bytes)
+        .map_err(|error| CoseError::new(format!("failed to decode protected header: {error}")))?;
+    let map = value
+        .as_map()
+        .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
+    reject_duplicate_integer_labels(map)?;
+
+    let alg = integer_label_i128(map, COSE_LABEL_ALG)?
+        .ok_or_else(|| CoseError::new("protected header missing required alg label"))?;
+    let kid = integer_label_bytes(map, COSE_LABEL_KID)?;
+    let suite_id = integer_label_u64(map, COSE_LABEL_SUITE_ID)?;
+    let artifact_type = integer_label_tstr(map, COSE_LABEL_ARTIFACT_TYPE)?;
+    let method_uri = integer_label_tstr(map, COSE_LABEL_METHOD_URI)?;
+
+    Ok(ProtectedHeader {
+        alg,
+        kid,
+        suite_id,
+        artifact_type,
+        method_uri,
+    })
+}
+
 fn reject_duplicate_integer_labels(map: &[(Value, Value)]) -> Result<(), CoseError> {
     let mut seen = HashSet::new();
     for (key, _) in map {
@@ -281,6 +375,17 @@ fn integer_label_bytes(map: &[(Value, Value)], label: i128) -> Result<Option<Vec
         .transpose()
 }
 
+fn integer_label_tstr(map: &[(Value, Value)], label: i128) -> Result<Option<String>, CoseError> {
+    integer_label_value(map, label)
+        .map(|value| {
+            value
+                .as_text()
+                .map(str::to_owned)
+                .ok_or_else(|| CoseError::new(format!("COSE label {label} is not a text string")))
+        })
+        .transpose()
+}
+
 fn integer_label_value(map: &[(Value, Value)], label: i128) -> Option<&Value> {
     map.iter()
         .find(|(key, _)| {
@@ -297,9 +402,24 @@ pub fn encode_cose_suite_id_label() -> Vec<u8> {
 }
 
 /// Encodes the COSE `profile_id` protected-header label.
+///
+/// Retired per ADR 0109; helper retained for legacy decode paths during the
+/// migration window.
 #[must_use]
 pub fn encode_cose_profile_id_label() -> Vec<u8> {
     encode_cbor_negative_int(COSE_PROFILE_ID_LABEL_MAGNITUDE)
+}
+
+/// Encodes the COSE `artifact_type` protected-header label (ADR 0109).
+#[must_use]
+pub fn encode_cose_artifact_type_label() -> Vec<u8> {
+    encode_cbor_negative_int(COSE_ARTIFACT_TYPE_LABEL_MAGNITUDE)
+}
+
+/// Encodes the COSE `method_uri` protected-header label (ADR 0109).
+#[must_use]
+pub fn encode_cose_method_uri_label() -> Vec<u8> {
+    encode_cbor_negative_int(COSE_METHOD_URI_LABEL_MAGNITUDE)
 }
 
 /// Derives the 16-byte `kid` from `suite_id` and an Ed25519 public key.
@@ -383,6 +503,59 @@ pub fn protected_header_bytes_for_alg_with_profile_id(
     }
     bytes.extend_from_slice(&encode_cose_profile_id_label());
     bytes.extend_from_slice(&encode_uint(profile_id));
+    bytes
+}
+
+/// Builds Trellis substrate-envelope protected-header map bytes (ADR 0109).
+///
+/// Emits a `MAP_4` with `alg`, `kid`, `suite_id`, and `artifact_type`. The
+/// substrate envelope shape wraps Trellis ledger events, Merkle checkpoints,
+/// and export manifests. `artifact_type` is a tstr value; callers (Trellis
+/// Core) own the closed enum (`"event"`, `"checkpoint"`, `"manifest"`) and
+/// pass the stringified value. This crate enforces the byte layout, not the
+/// value semantics.
+#[must_use]
+pub fn substrate_protected_header(
+    alg: i32,
+    kid: &[u8],
+    suite_id: u64,
+    artifact_type: &str,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(48);
+    bytes.push(CBOR_MAP_4);
+    bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
+    bytes.extend_from_slice(&encode_i128(i128::from(alg)));
+    bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
+    bytes.extend_from_slice(&encode_bstr(kid));
+    bytes.extend_from_slice(&encode_cose_suite_id_label());
+    bytes.extend_from_slice(&encode_uint(suite_id));
+    bytes.extend_from_slice(&encode_cose_artifact_type_label());
+    bytes.extend_from_slice(&encode_tstr(artifact_type));
+    bytes
+}
+
+/// Builds consumer detached-signature protected-header map bytes (ADR 0109).
+///
+/// Emits a `MAP_3` with `alg`, `kid`, and `method_uri`. The consumer envelope
+/// shape carries Formspec authored signatures, future WOS attestations,
+/// verification receipts, and other consumer-owned signed artifacts.
+/// `method_uri` is a URI-shaped tstr; callers route on the URI prefix to
+/// dispatch the right validator. This crate enforces the byte layout, not
+/// the URI scheme or value semantics.
+#[must_use]
+pub fn detached_signature_protected_header(
+    alg: i32,
+    kid: &[u8],
+    method_uri: &str,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(48);
+    bytes.push(CBOR_MAP_3);
+    bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
+    bytes.extend_from_slice(&encode_i128(i128::from(alg)));
+    bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
+    bytes.extend_from_slice(&encode_bstr(kid));
+    bytes.extend_from_slice(&encode_cose_method_uri_label());
+    bytes.extend_from_slice(&encode_tstr(method_uri));
     bytes
 }
 
@@ -490,9 +663,11 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        decode_cose_sign1, protected_header_bytes, protected_header_bytes_for_alg,
-        protected_header_bytes_with_profile_id, sig_structure_bytes, sign_ed25519, sign1_bytes,
-        sign1_detached_bytes, verify_ed25519_sign1,
+        decode_cose_sign1, decode_protected_header, detached_signature_protected_header,
+        encode_cose_artifact_type_label, encode_cose_method_uri_label, protected_header_bytes,
+        protected_header_bytes_for_alg, protected_header_bytes_with_profile_id, sig_structure_bytes,
+        sign_ed25519, sign1_bytes, sign1_detached_bytes, substrate_protected_header,
+        verify_ed25519_sign1, COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_METHOD_URI,
     };
 
     #[test]
@@ -686,5 +861,157 @@ mod tests {
             )
             .expect("verify generated sign1")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR 0109 — Substrate envelope and consumer detached-signature shapes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cose_label_artifact_type_is_minus_65538() {
+        assert_eq!(COSE_LABEL_ARTIFACT_TYPE, -65_538);
+    }
+
+    #[test]
+    fn cose_label_method_uri_is_minus_65540() {
+        assert_eq!(COSE_LABEL_METHOD_URI, -65_540);
+    }
+
+    #[test]
+    fn artifact_type_label_encodes_to_dcbor_negative_5byte() {
+        // -65538 = -(65537 + 1) → CBOR major type 1, 4-byte payload 0x00010001.
+        assert_eq!(
+            encode_cose_artifact_type_label(),
+            vec![0x3a, 0x00, 0x01, 0x00, 0x01]
+        );
+    }
+
+    #[test]
+    fn method_uri_label_encodes_to_dcbor_negative_5byte() {
+        // -65540 = -(65539 + 1) → CBOR major type 1, 4-byte payload 0x00010003.
+        assert_eq!(
+            encode_cose_method_uri_label(),
+            vec![0x3a, 0x00, 0x01, 0x00, 0x03]
+        );
+    }
+
+    #[test]
+    fn substrate_protected_header_emits_map_4_with_artifact_type_event() {
+        let protected = substrate_protected_header(-8, &[0x11; 16], 1, "event");
+
+        assert_eq!(
+            protected,
+            vec![
+                0xa4, // MAP_4
+                0x01, 0x27, // alg = -8 (EdDSA)
+                0x04, 0x50, // kid label + bstr length 16
+                0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+                0x11, 0x11, // kid bytes
+                0x3a, 0x00, 0x01, 0x00, 0x00, // suite_id label (-65537)
+                0x01, // suite_id value = 1
+                0x3a, 0x00, 0x01, 0x00, 0x01, // artifact_type label (-65538)
+                0x65, b'e', b'v', b'e', b'n', b't', // tstr "event"
+            ]
+        );
+    }
+
+    #[test]
+    fn substrate_protected_header_round_trips_through_decode() {
+        let bytes = substrate_protected_header(-8, &[0x22; 16], 1, "checkpoint");
+        let header = decode_protected_header(&bytes).expect("decode substrate header");
+
+        assert_eq!(header.alg, -8);
+        assert_eq!(header.kid.as_deref(), Some(&[0x22u8; 16][..]));
+        assert_eq!(header.suite_id, Some(1));
+        assert_eq!(header.artifact_type.as_deref(), Some("checkpoint"));
+        assert_eq!(header.method_uri, None);
+    }
+
+    #[test]
+    fn detached_signature_protected_header_emits_map_3_with_method_uri() {
+        let method_uri = "urn:formspec:sig-method:ed25519@1";
+        let protected = detached_signature_protected_header(-8, &[0x33; 16], method_uri);
+
+        // MAP_3 header
+        assert_eq!(protected[0], 0xa3);
+        // alg label + value
+        assert_eq!(&protected[1..3], &[0x01, 0x27]);
+        // kid label + bstr-len-16 prefix
+        assert_eq!(&protected[3..5], &[0x04, 0x50]);
+        assert_eq!(&protected[5..21], &[0x33u8; 16]);
+        // method_uri label
+        assert_eq!(&protected[21..26], &[0x3a, 0x00, 0x01, 0x00, 0x03]);
+        // tstr len 33 < 24 boundary? 33 needs additional-info 24 + length byte
+        assert_eq!(protected[26], 0x78);
+        assert_eq!(protected[27], 33u8);
+        assert_eq!(&protected[28..], method_uri.as_bytes());
+    }
+
+    #[test]
+    fn detached_signature_protected_header_round_trips_through_decode() {
+        let method_uri = "urn:formspec:receipt-method:ed25519-cose-sign1@1";
+        let bytes = detached_signature_protected_header(-8, &[0x44; 16], method_uri);
+        let header = decode_protected_header(&bytes).expect("decode consumer header");
+
+        assert_eq!(header.alg, -8);
+        assert_eq!(header.kid.as_deref(), Some(&[0x44u8; 16][..]));
+        assert_eq!(header.suite_id, None);
+        assert_eq!(header.artifact_type, None);
+        assert_eq!(header.method_uri.as_deref(), Some(method_uri));
+    }
+
+    #[test]
+    fn decode_protected_header_rejects_missing_alg() {
+        // CBOR MAP_1 with only kid (label 4) — no alg.
+        let bytes = [0xa1, 0x04, 0x42, 0x00, 0x01];
+        let error = decode_protected_header(&bytes).expect_err("missing alg must reject");
+        assert!(
+            error.to_string().contains("missing required alg label"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_protected_header_rejects_artifact_type_with_wrong_value_type() {
+        // MAP_2: alg=-8, artifact_type=42 (uint instead of tstr).
+        let bytes = [
+            0xa2, 0x01, 0x27, 0x3a, 0x00, 0x01, 0x00, 0x01, 0x18, 0x2a,
+        ];
+        let error = decode_protected_header(&bytes)
+            .expect_err("non-tstr artifact_type must reject");
+        assert!(
+            error.to_string().contains("is not a text string"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_protected_header_rejects_duplicate_labels() {
+        // MAP_2 with alg appearing twice.
+        let bytes = [0xa2, 0x01, 0x27, 0x01, 0x26];
+        let error = decode_protected_header(&bytes).expect_err("duplicate label must reject");
+        assert!(
+            error.to_string().contains("duplicate"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn substrate_and_consumer_headers_are_structurally_distinct() {
+        let substrate = substrate_protected_header(-8, &[0xaa; 16], 1, "event");
+        let consumer = detached_signature_protected_header(-8, &[0xaa; 16], "urn:x:y@1");
+
+        let substrate_header = decode_protected_header(&substrate).expect("decode substrate");
+        let consumer_header = decode_protected_header(&consumer).expect("decode consumer");
+
+        // Substrate: suite_id + artifact_type populated; method_uri absent.
+        assert!(substrate_header.suite_id.is_some());
+        assert!(substrate_header.artifact_type.is_some());
+        assert!(substrate_header.method_uri.is_none());
+
+        // Consumer: method_uri populated; suite_id + artifact_type absent.
+        assert!(consumer_header.method_uri.is_some());
+        assert!(consumer_header.suite_id.is_none());
+        assert!(consumer_header.artifact_type.is_none());
     }
 }
