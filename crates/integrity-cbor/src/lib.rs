@@ -12,7 +12,6 @@
 extern crate alloc;
 
 use alloc::borrow::ToOwned;
-#[cfg(feature = "json")]
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -148,6 +147,60 @@ pub fn decode_cbor_value(bytes: &[u8]) -> Result<Value, CborHelperError> {
         ));
     }
     Ok(value)
+}
+
+/// Recursively sorts CBOR map entries by encoded key bytes.
+///
+/// # Errors
+/// Returns an error when any map key cannot be encoded as CBOR.
+pub fn canonicalize_cbor_value(value: &Value) -> Result<Value, CborHelperError> {
+    match value {
+        Value::Array(items) => Ok(Value::Array(
+            items
+                .iter()
+                .map(canonicalize_cbor_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Map(entries) => {
+            let mut entries = entries
+                .iter()
+                .map(|(key, value)| {
+                    let key = canonicalize_cbor_value(key)?;
+                    let value = canonicalize_cbor_value(value)?;
+                    let encoded_key = encoded_cbor_key_bytes(&key)?;
+                    Ok((encoded_key, key, value))
+                })
+                .collect::<Result<Vec<_>, CborHelperError>>()?;
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(Value::Map(
+                entries
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
+        }
+        Value::Tag(tag, item) => Ok(Value::Tag(*tag, Box::new(canonicalize_cbor_value(item)?))),
+        other => Ok(other.clone()),
+    }
+}
+
+/// Encodes a CBOR value without recursive canonicalization.
+///
+/// # Errors
+/// Returns an error when `ciborium` cannot encode `value`.
+pub fn encode_cbor_value(value: &Value) -> Result<Vec<u8>, CborHelperError> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|error| CborHelperError(format!("failed to encode CBOR: {error}")))?;
+    Ok(bytes)
+}
+
+/// Recursively canonicalizes and encodes a CBOR value.
+///
+/// # Errors
+/// Returns an error when recursive map-key ordering or CBOR encoding fails.
+pub fn encode_canonical_cbor_value(value: &Value) -> Result<Vec<u8>, CborHelperError> {
+    encode_cbor_value(&canonicalize_cbor_value(value)?)
 }
 
 /// Encodes JSON into deterministic CBOR bytes.
@@ -332,7 +385,8 @@ fn json_to_cbor_value_at_path(
                 let key_value = Value::Text(key.clone());
                 let value = json_to_cbor_value_at_path(item, path, string_tags)?;
                 path.pop();
-                let key_bytes = encoded_cbor_key_bytes(&key_value)?;
+                let key_bytes = encoded_cbor_key_bytes(&key_value)
+                    .map_err(|error| JsonCborError::Cbor(error.to_string()))?;
                 entries.push((key_bytes, key_value, value));
             }
             entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -346,12 +400,8 @@ fn json_to_cbor_value_at_path(
     }
 }
 
-#[cfg(feature = "json")]
-fn encoded_cbor_key_bytes(value: &Value) -> Result<Vec<u8>, JsonCborError> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map_err(|error| JsonCborError::Cbor(error.to_string()))?;
-    Ok(bytes)
+fn encoded_cbor_key_bytes(value: &Value) -> Result<Vec<u8>, CborHelperError> {
+    encode_cbor_value(value)
 }
 
 /// Performs a case-sensitive map lookup for a text key.
@@ -599,22 +649,22 @@ fn encode_major_len(major: u8, value: u64) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "json")]
     use alloc::borrow::ToOwned;
-    use alloc::string::ToString;
+    use alloc::string::{String, ToString};
     use alloc::vec;
-    #[cfg(feature = "json")]
     use alloc::vec::Vec;
+
+    use proptest::prelude::*;
 
     #[cfg(feature = "json")]
     use super::{
-        JsonCborError, Value, cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
+        JsonCborError, cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
         json_to_dcbor_bytes_with_limit, map_lookup_value, validate_json_f64_for_dcbor,
     };
     use super::{
-        decode_cbor_value, domain_separated_sha256, encode_bstr, encode_cbor_negative_int,
-        encode_tstr, encode_uint, map_lookup_fixed_bytes, map_lookup_text, map_lookup_u64,
-        sha256_bytes,
+        Value, canonicalize_cbor_value, decode_cbor_value, domain_separated_sha256, encode_bstr,
+        encode_canonical_cbor_value, encode_cbor_negative_int, encode_tstr, encode_uint,
+        map_lookup_fixed_bytes, map_lookup_text, map_lookup_u64, sha256_bytes,
     };
 
     #[test]
@@ -685,6 +735,66 @@ mod tests {
         let second = domain_separated_sha256("second", b"payload");
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn canonicalize_cbor_value_sorts_nested_maps_by_key_bytes() {
+        let value = Value::Map(vec![(
+            Value::Text("consent".to_owned()),
+            Value::Map(vec![
+                (Value::Text("z".to_owned()), Value::Text("last".to_owned())),
+                (Value::Text("a".to_owned()), Value::Text("first".to_owned())),
+            ]),
+        )]);
+
+        let canonical = canonicalize_cbor_value(&value).expect("canonical value");
+        let root = canonical.as_map().expect("root map");
+        let consent = root[0].1.as_map().expect("consent map");
+        let keys = consent
+            .iter()
+            .map(|(key, _)| key.as_text().expect("text key"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["a", "z"]);
+        assert_eq!(
+            encode_canonical_cbor_value(&value).expect("canonical bytes"),
+            vec![
+                0xa1, 0x67, b'c', b'o', b'n', b's', b'e', b'n', b't', 0xa2, 0x61, b'a', 0x65, b'f',
+                b'i', b'r', b's', b't', 0x61, b'z', 0x64, b'l', b'a', b's', b't',
+            ]
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn canonicalize_cbor_value_is_order_invariant_for_nested_maps(
+            entries in proptest::collection::btree_map("[a-z]{1,5}", "[a-z]{0,8}", 1..8)
+        ) {
+            let sorted_entries = entries.into_iter().collect::<Vec<_>>();
+            let mut reversed_entries = sorted_entries.clone();
+            reversed_entries.reverse();
+            let sorted = nested_consent_value(sorted_entries);
+            let reversed = nested_consent_value(reversed_entries);
+
+            prop_assert_eq!(
+                encode_canonical_cbor_value(&sorted).expect("sorted canonical bytes"),
+                encode_canonical_cbor_value(&reversed).expect("reversed canonical bytes"),
+            );
+        }
+    }
+
+    fn nested_consent_value(entries: Vec<(String, String)>) -> Value {
+        Value::Map(vec![(
+            Value::Text("consent".to_owned()),
+            Value::Map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (Value::Text(key), Value::Text(value)))
+                    .collect(),
+            ),
+        )])
     }
 
     #[cfg(feature = "json")]
