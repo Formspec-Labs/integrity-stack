@@ -11,7 +11,6 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use integrity_bundle::{BundleEntry, read_stored_zip};
-use integrity_cose::decode_cose_sign1;
 use integrity_verify::trellis::Severity;
 use integrity_verify::{
     BundleEntryView, ProfileRegistry, SubstrateTier, VerificationReport, VerifyBundleInput,
@@ -195,7 +194,7 @@ fn verify_command(
 
     let mut event_indices: Vec<usize> = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        if is_candidate_event(entry) {
+        if is_candidate_event_path(entry) {
             event_indices.push(index);
         }
     }
@@ -249,12 +248,16 @@ fn verify_command(
         }
     }
 
-    if !report.universal_failures.is_empty() || !report.bundle_findings.is_empty() {
+    if !report.universal_failures.is_empty()
+        || !report.bundle_findings.is_empty()
+        || !report.profile_verified
+    {
         return Err(format!(
-            "verification failed: substrate_tier={:?} universal_failures={} bundle_findings={}",
+            "verification failed: substrate_tier={:?} universal_failures={} bundle_findings={} profile_verified={}",
             report.substrate_tier,
             report.universal_failures.len(),
-            report.bundle_findings.len()
+            report.bundle_findings.len(),
+            report.profile_verified
         ));
     }
     Ok(())
@@ -309,11 +312,8 @@ fn stdout_err(error: std::io::Error) -> String {
     format!("failed to write to stdout: {error}")
 }
 
-fn is_candidate_event(entry: &BundleEntry) -> bool {
-    if !entry.path().ends_with(".cbor") {
-        return false;
-    }
-    decode_cose_sign1(entry.bytes()).is_ok()
+fn is_candidate_event_path(entry: &BundleEntry) -> bool {
+    entry.path().ends_with(".cbor")
 }
 
 fn render_text(
@@ -602,6 +602,67 @@ fn wos_failure_count(report: &WosVerificationReport) -> usize {
 mod tests {
     use super::*;
 
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use integrity_bundle::{Bundle, BundleEntry};
+    use integrity_cose::{
+        protected_header_bytes, protected_header_bytes_with_profile_id, sig_structure_bytes,
+        sign1_bytes,
+    };
+    use integrity_verify::{ProfileVerificationResult, ProfileVerifier};
+
+    struct CliVerifier {
+        verified: bool,
+    }
+
+    impl ProfileVerifier for CliVerifier {
+        fn verifier_id(&self) -> &str {
+            "cli-default"
+        }
+
+        fn verify_profile_record(&self, _: &[u8], _: &[u8]) -> ProfileVerificationResult {
+            if self.verified {
+                ProfileVerificationResult::verified(self.verifier_id(), "ok")
+            } else {
+                ProfileVerificationResult::failed(
+                    self.verifier_id(),
+                    "failed",
+                    vec!["profile rejected record".into()],
+                )
+            }
+        }
+    }
+
+    fn signed_event(protected_header: Vec<u8>, payload: &[u8]) -> Vec<u8> {
+        let signing_key = SigningKey::from_bytes(&[0x51; 32]);
+        let sig_struct = sig_structure_bytes(&protected_header, payload);
+        let signature = signing_key.sign(&sig_struct);
+        sign1_bytes(&protected_header, payload, signature.to_bytes())
+    }
+
+    fn test_bundle_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "integrity-verify-cli-{name}-{}-{nonce}.zip",
+            std::process::id()
+        ))
+    }
+
+    fn write_test_bundle(name: &str, entries: &[(&str, Vec<u8>)]) -> PathBuf {
+        let mut bundle = Bundle::new();
+        for (path, bytes) in entries {
+            bundle.add_entry(BundleEntry::new(*path, bytes.clone()));
+        }
+        let zip = bundle.to_zip_bytes().expect("test bundle should serialize");
+        let path = test_bundle_path(name);
+        std::fs::write(&path, zip).expect("test bundle should write");
+        path
+    }
+
     #[test]
     fn parse_format_tokens() {
         assert_eq!(OutputFormat::parse("text").unwrap(), OutputFormat::Text);
@@ -666,5 +727,112 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown command"), "{err}");
+    }
+
+    #[test]
+    fn verify_reports_retired_profile_id_cbor_as_failure() {
+        let retired_event = signed_event(
+            protected_header_bytes_with_profile_id([0xab; 16], 99),
+            b"payload",
+        );
+        let bundle_path =
+            write_test_bundle("retired-profile-id", &[("events/0001.cbor", retired_event)]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let registry = || ProfileRegistry::new();
+
+        let result = run(
+            &[
+                "integrity-verify".into(),
+                "verify".into(),
+                bundle_path.display().to_string(),
+                "--format".into(),
+                "json".into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            &registry,
+        );
+        let _ = std::fs::remove_file(&bundle_path);
+
+        let err = result.expect_err("retired profile_id must fail verification");
+        let output = String::from_utf8(stdout).expect("stdout should be UTF-8");
+        assert!(err.contains("universal_failures=1"), "{err}");
+        assert!(output.contains("RetiredProfileIdPresent"), "{output}");
+        assert!(
+            output.contains("\"kind\": \"malformed_envelope\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn verify_fails_when_default_verifier_fails() {
+        let event = signed_event(protected_header_bytes([0xab; 16]), b"payload");
+        let bundle_path = write_test_bundle("profile-failure", &[("events/0001.cbor", event)]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let registry = || {
+            let mut registry = ProfileRegistry::new();
+            registry.register_default(Box::new(CliVerifier { verified: false }));
+            registry
+        };
+
+        let result = run(
+            &[
+                "integrity-verify".into(),
+                "verify".into(),
+                bundle_path.display().to_string(),
+                "--format".into(),
+                "json".into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            &registry,
+        );
+        let _ = std::fs::remove_file(&bundle_path);
+
+        let err = result.expect_err("profile verifier failure must fail the CLI");
+        let output = String::from_utf8(stdout).expect("stdout should be UTF-8");
+        assert!(err.contains("profile_verified=false"), "{err}");
+        assert!(output.contains("\"profile_verified\": false"), "{output}");
+        assert!(
+            output.contains("\"verifier_id\": \"cli-default\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn verify_json_uses_verifier_id_not_profile_id() {
+        let event = signed_event(protected_header_bytes([0xab; 16]), b"payload");
+        let bundle_path = write_test_bundle("json-verifier-id", &[("events/0001.cbor", event)]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let registry = || {
+            let mut registry = ProfileRegistry::new();
+            registry.register_default(Box::new(CliVerifier { verified: true }));
+            registry
+        };
+
+        run(
+            &[
+                "integrity-verify".into(),
+                "verify".into(),
+                bundle_path.display().to_string(),
+                "--format".into(),
+                "json".into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            &registry,
+        )
+        .expect("verified event should pass");
+        let _ = std::fs::remove_file(&bundle_path);
+
+        let output = String::from_utf8(stdout).expect("stdout should be UTF-8");
+        assert!(
+            output.contains("\"verifier_id\": \"cli-default\""),
+            "{output}"
+        );
+        assert!(!output.contains("profile_id"), "{output}");
     }
 }

@@ -12,9 +12,9 @@
 //! Bundles produced by `integrity-bundle` are deterministic ZIP archives
 //! (STORED-only, fixed timestamps, sorted paths). This CLI reads every
 //! `.cbor` entry and tries to decode it as a tagged COSE_Sign1 envelope —
-//! entries that parse become events under [`VerifyEvent`]; entries that do
-//! not parse remain in the bundle structural axis only. All entry paths
-//! participate in [`BundleStructuralCheck`].
+//! malformed envelopes become universal verification failures instead of being
+//! filtered before verification. All entry paths participate in
+//! [`BundleStructuralCheck`].
 
 #![forbid(unsafe_code)]
 
