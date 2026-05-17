@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 
 use ciborium::Value;
 use trellis_types::{
-    decode_cbor_value, map_lookup_array, map_lookup_bool, map_lookup_bytes, map_lookup_fixed_bytes,
-    map_lookup_map, map_lookup_optional_bytes, map_lookup_optional_fixed_bytes,
-    map_lookup_optional_map, map_lookup_optional_text, map_lookup_optional_value, map_lookup_text,
-    map_lookup_u64,
+    ArtifactType, decode_cbor_value, map_lookup_array, map_lookup_bool, map_lookup_bytes,
+    map_lookup_fixed_bytes, map_lookup_map, map_lookup_optional_bytes,
+    map_lookup_optional_fixed_bytes, map_lookup_optional_map, map_lookup_optional_text,
+    map_lookup_optional_value, map_lookup_text, map_lookup_u64,
 };
 
 use super::{
@@ -50,6 +50,22 @@ pub(crate) fn parse_sign1_value(value: &Value) -> Result<ParsedSign1, VerifyErro
         .suite_id()
         .map(i128::from)
         .ok_or_else(|| VerifyError::new("missing COSE label -65537 integer"))?;
+    let artifact_type = sign1
+        .artifact_type()
+        .ok_or_else(|| {
+            VerifyError::with_kind(
+                "ArtifactTypeMissing: missing COSE label -65538 artifact_type",
+                VerifyErrorKind::MalformedCose,
+            )
+        })
+        .and_then(|value| {
+            ArtifactType::from_cose_value(value).map_err(|error| {
+                VerifyError::with_kind(
+                    format!("ArtifactTypeUnknown: {error}"),
+                    VerifyErrorKind::MalformedCose,
+                )
+            })
+        })?;
     let signature: [u8; 64] = sign1
         .signature()
         .try_into()
@@ -60,6 +76,7 @@ pub(crate) fn parse_sign1_value(value: &Value) -> Result<ParsedSign1, VerifyErro
         kid,
         alg,
         suite_id,
+        artifact_type,
         payload: sign1.payload().map(<[u8]>::to_vec),
         signature,
     })

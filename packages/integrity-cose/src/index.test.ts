@@ -1,27 +1,31 @@
 /** @filedesc Unit tests for the TypeScript integrity COSE package. */
 import { describe, expect, it } from 'vitest';
 import {
+  COSE_LABEL_ARTIFACT_TYPE,
   COSE_LABEL_METHOD_URI,
-  COSE_LABEL_PROFILE_ID,
-  FORMSPEC_PROFILE_ID,
   MAX_METHOD_URI_LEN,
-  WOS_PROFILE_ID,
   decodeCoseSign1,
   decodeCoseSign1WithMethodUri,
-  decodeFormspecCoseSign1,
   deriveKid,
   detachedSignatureProtectedHeader,
   encodeCoseSign1,
   extractMethodUri,
   protectedHeaderBytesForAlg,
-  protectedHeaderBytesForAlgWithProfileId,
-  protectedHeaderBytesForFormspec,
-  protectedHeaderBytesWithProfileId,
+  protectedHeaderBytesWithSuiteId,
   resolvePayload,
   sigStructureBytes,
+  substrateProtectedHeader,
 } from './index';
 
 describe('COSE_Sign1 helpers', () => {
+  function retiredDispatchProtectedHeader(): Uint8Array {
+    return new Uint8Array([
+      0xa4, 0x01, 0x27, 0x04, 0x50, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+      0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x3a,
+      0x00, 0x01, 0x00, 0x00, 0x01, 0x3a, 0x00, 0x01, 0x00, 0x02, 0x01,
+    ]);
+  }
+
   it('decodes detached COSE_Sign1 with alg and kid', () => {
     const protectedHeader = protectedHeaderBytesForAlg(-8, new Uint8Array([1, 2, 3]));
     const signature = new Uint8Array(64).fill(7);
@@ -31,52 +35,37 @@ describe('COSE_Sign1 helpers', () => {
 
     expect(decoded.alg).toBe(-8);
     expect(decoded.kid).toEqual(new Uint8Array([1, 2, 3]));
-    expect(decoded.profileId).toBeNull();
+    expect(decoded.artifactType).toBeNull();
     expect(decoded.payload).toBeNull();
     expect(decoded.signature).toEqual(signature);
     expect(resolvePayload(decoded, new Uint8Array([9]))).toEqual(new Uint8Array([9]));
   });
 
-  it('rejects missing Formspec profile id', () => {
-    const protectedHeader = protectedHeaderBytesForAlg(-8, new Uint8Array([1, 2, 3]));
-    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
-
-    expect(() => decodeFormspecCoseSign1(encoded)).toThrow(
-      `missing Formspec profile_id protected header (label ${COSE_LABEL_PROFILE_ID})`,
-    );
-  });
-
-  it('rejects retired profile id before profile-specific dispatch', () => {
-    const protectedHeader = protectedHeaderBytesForAlgWithProfileId(
-      -8,
-      new Uint8Array([1, 2, 3]),
-      WOS_PROFILE_ID,
-    );
-    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
-
-    expect(() => decodeFormspecCoseSign1(encoded)).toThrow(
-      /RetiredProfileIdPresent/,
-    );
-  });
-
-  it('emits Formspec protected-header bytes with profile id 2', () => {
-    const protectedHeader = protectedHeaderBytesForFormspec(-8, new Uint8Array(16).fill(0xaa));
-
-    expect(Array.from(protectedHeader)).toEqual([
-      0xa3, 0x01, 0x27, 0x04, 0x50, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
-      0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0x3a, 0x00, 0x01,
-      0x00, 0x02, 0x02,
-    ]);
-  });
-
   it('emits suite protected-header bytes matching the Rust golden vector', () => {
-    const protectedHeader = protectedHeaderBytesWithProfileId(new Uint8Array(16).fill(0x11), 1);
+    const protectedHeader = protectedHeaderBytesWithSuiteId(new Uint8Array(16).fill(0x11), 1);
 
     expect(Array.from(protectedHeader)).toEqual([
       0xa4, 0x01, 0x27, 0x04, 0x50, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
       0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x3a, 0x00, 0x01,
-      0x00, 0x00, 0x01, 0x3a, 0x00, 0x01, 0x00, 0x02, 0x01,
+      0x00, 0x00, 0x01, 0x3a, 0x00, 0x01, 0x00, 0x01, 0x65, 0x65, 0x76, 0x65,
+      0x6e, 0x74,
     ]);
+  });
+
+  it('round-trips substrate artifact_type', () => {
+    const protectedHeader = substrateProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x22),
+      1,
+      'checkpoint',
+    );
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    const decoded = decodeCoseSign1(encoded);
+
+    expect(decoded.suiteId).toBe(1);
+    expect(decoded.artifactType).toBe('checkpoint');
+    expect(decoded.protectedHeader.get(COSE_LABEL_ARTIFACT_TYPE)).toBe('checkpoint');
   });
 
   it('rejects embedded payload mismatch', () => {
@@ -92,11 +81,11 @@ describe('COSE_Sign1 helpers', () => {
     );
   });
 
-  it('decodeCoseSign1 rejects the retired profile_id label', () => {
-    const protectedHeader = protectedHeaderBytesWithProfileId(new Uint8Array(16).fill(0x11), 1);
+  it('decodeCoseSign1 rejects the retired dispatch label', () => {
+    const protectedHeader = retiredDispatchProtectedHeader();
     const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
 
-    expect(() => decodeCoseSign1(encoded)).toThrow(/RetiredProfileIdPresent/);
+    expect(() => decodeCoseSign1(encoded)).toThrow(/RetiredDispatchLabelPresent/);
   });
 
   it('rejects duplicate protected-header labels', () => {
@@ -161,7 +150,7 @@ describe('consumer detached-signature envelopes (ADR 0109)', () => {
     expect(decoded.alg).toBe(-8);
     expect(decoded.kid).toEqual(new Uint8Array(16).fill(0x44));
     expect(decoded.methodUri).toBe(RECEIPT_METHOD_URI);
-    expect(decoded.profileId).toBeNull();
+    expect(decoded.artifactType).toBeNull();
     expect(decoded.suiteId).toBeNull();
   });
 

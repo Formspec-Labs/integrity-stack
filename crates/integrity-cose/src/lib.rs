@@ -29,11 +29,11 @@ pub const COSE_LABEL_ALG: i128 = 1;
 pub const COSE_LABEL_KID: i128 = 4;
 /// COSE protected-header label for an integrity profile suite.
 pub const COSE_LABEL_SUITE_ID: i128 = -65_537;
-/// COSE protected-header label for retired profile dispatch.
+/// COSE protected-header label for the retired ADR 0109 dispatch slot.
 ///
 /// **Retired by ADR 0109.** New envelopes MUST NOT carry this label. Decode
 /// helpers reject envelopes presenting it with a named error.
-pub const COSE_LABEL_PROFILE_ID: i128 = -65_539;
+const COSE_LABEL_RETIRED_DISPATCH_ID: i128 = -65_539;
 /// COSE protected-header label for Trellis substrate `artifact_type` (ADR 0109).
 ///
 /// Closed-enum tstr value: `"event"`, `"checkpoint"`, or `"manifest"`.
@@ -62,8 +62,9 @@ pub const MAX_METHOD_URI_LEN: usize = 512;
 
 /// Unsigned magnitude for [`COSE_LABEL_SUITE_ID`].
 pub const COSE_SUITE_ID_LABEL_MAGNITUDE: u64 = 65_536;
-/// Unsigned magnitude for [`COSE_LABEL_PROFILE_ID`].
-pub const COSE_PROFILE_ID_LABEL_MAGNITUDE: u64 = 65_538;
+/// Unsigned magnitude for the retired ADR 0109 dispatch label.
+#[cfg(test)]
+const COSE_RETIRED_DISPATCH_LABEL_MAGNITUDE: u64 = 65_538;
 /// Unsigned magnitude for [`COSE_LABEL_ARTIFACT_TYPE`].
 pub const COSE_ARTIFACT_TYPE_LABEL_MAGNITUDE: u64 = 65_537;
 /// Unsigned magnitude for [`COSE_LABEL_METHOD_URI`].
@@ -86,7 +87,7 @@ pub struct CoseSign1 {
     alg: Option<i128>,
     kid: Option<Vec<u8>>,
     suite_id: Option<u64>,
-    profile_id: Option<u64>,
+    artifact_type: Option<String>,
     payload: Option<Vec<u8>>,
     signature: Vec<u8>,
 }
@@ -116,10 +117,10 @@ impl CoseSign1 {
         self.suite_id
     }
 
-    /// Returns the plugin-dispatch profile identifier, if present.
+    /// Returns the Trellis substrate artifact type, if present.
     #[must_use]
-    pub fn profile_id(&self) -> Option<u64> {
-        self.profile_id
+    pub fn artifact_type(&self) -> Option<&str> {
+        self.artifact_type.as_deref()
     }
 
     /// Returns the embedded payload, if the envelope is not detached.
@@ -222,7 +223,7 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
         .as_map()
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
     reject_duplicate_integer_labels(protected_map)?;
-    reject_retired_profile_id(protected_map)?;
+    reject_retired_dispatch_label(protected_map)?;
     reject_over_cap_method_uri(protected_map)?;
 
     match &items[1] {
@@ -246,7 +247,7 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
         alg: integer_label_i128(protected_map, COSE_LABEL_ALG)?,
         kid: integer_label_bytes(protected_map, COSE_LABEL_KID)?,
         suite_id: integer_label_u64(protected_map, COSE_LABEL_SUITE_ID)?,
-        profile_id: None,
+        artifact_type: integer_label_tstr(protected_map, COSE_LABEL_ARTIFACT_TYPE)?,
         payload,
         signature,
     })
@@ -314,7 +315,7 @@ pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseErro
         .as_map()
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
     reject_duplicate_integer_labels(map)?;
-    reject_retired_profile_id(map)?;
+    reject_retired_dispatch_label(map)?;
 
     let alg = integer_label_i128(map, COSE_LABEL_ALG)?
         .ok_or_else(|| CoseError::new("protected header missing required alg label"))?;
@@ -350,10 +351,10 @@ fn reject_duplicate_integer_labels(map: &[(Value, Value)]) -> Result<(), CoseErr
     Ok(())
 }
 
-fn reject_retired_profile_id(map: &[(Value, Value)]) -> Result<(), CoseError> {
-    if integer_label_value(map, COSE_LABEL_PROFILE_ID).is_some() {
+fn reject_retired_dispatch_label(map: &[(Value, Value)]) -> Result<(), CoseError> {
+    if integer_label_value(map, COSE_LABEL_RETIRED_DISPATCH_ID).is_some() {
         return Err(CoseError::new(
-            "RetiredProfileIdPresent: retired profile_id protected-header label -65539 is present",
+            "RetiredDispatchLabelPresent: retired protected-header label -65539 is present",
         ));
     }
     Ok(())
@@ -433,15 +434,6 @@ pub fn encode_cose_suite_id_label() -> Vec<u8> {
     encode_cbor_negative_int(COSE_SUITE_ID_LABEL_MAGNITUDE)
 }
 
-/// Encodes the COSE `profile_id` protected-header label.
-///
-/// Retired per ADR 0109; helper retained for legacy decode paths during the
-/// migration window.
-#[must_use]
-pub fn encode_cose_profile_id_label() -> Vec<u8> {
-    encode_cbor_negative_int(COSE_PROFILE_ID_LABEL_MAGNITUDE)
-}
-
 /// Encodes the COSE `artifact_type` protected-header label (ADR 0109).
 #[must_use]
 pub fn encode_cose_artifact_type_label() -> Vec<u8> {
@@ -466,34 +458,10 @@ pub fn derive_kid(suite_id: u64, public_key: [u8; 32]) -> [u8; 16] {
     kid
 }
 
-/// Builds the current suite protected-header map bytes.
+/// Builds the current Trellis event protected-header map bytes.
 #[must_use]
 pub fn protected_header_bytes(kid: [u8; 16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(32);
-    bytes.push(CBOR_MAP_3);
-    bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
-    bytes.extend_from_slice(&encode_cbor_negative_int(7));
-    bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
-    bytes.extend_from_slice(&encode_bstr(&kid));
-    bytes.extend_from_slice(&encode_cose_suite_id_label());
-    bytes.extend_from_slice(&encode_uint(SUITE_ID_PHASE_1));
-    bytes
-}
-
-/// Builds protected-header map bytes with a `profile_id`.
-#[must_use]
-pub fn protected_header_bytes_with_profile_id(kid: [u8; 16], profile_id: u64) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(40);
-    bytes.push(CBOR_MAP_4);
-    bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
-    bytes.extend_from_slice(&encode_cbor_negative_int(7));
-    bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
-    bytes.extend_from_slice(&encode_bstr(&kid));
-    bytes.extend_from_slice(&encode_cose_suite_id_label());
-    bytes.extend_from_slice(&encode_uint(SUITE_ID_PHASE_1));
-    bytes.extend_from_slice(&encode_cose_profile_id_label());
-    bytes.extend_from_slice(&encode_uint(profile_id));
-    bytes
+    substrate_protected_header(-8, &kid, SUITE_ID_PHASE_1, "event")
 }
 
 /// Builds protected-header map bytes for a caller-supplied algorithm.
@@ -511,30 +479,6 @@ pub fn protected_header_bytes_for_alg(alg: i128, kid: Option<&[u8]>) -> Vec<u8> 
         bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
         bytes.extend_from_slice(&encode_bstr(kid));
     }
-    bytes
-}
-
-/// Builds protected-header map bytes for an algorithm and profile.
-#[must_use]
-pub fn protected_header_bytes_for_alg_with_profile_id(
-    alg: i128,
-    kid: Option<&[u8]>,
-    profile_id: u64,
-) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.push(if kid.is_some() {
-        CBOR_MAP_3
-    } else {
-        CBOR_MAP_2
-    });
-    bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
-    bytes.extend_from_slice(&encode_i128(alg));
-    if let Some(kid) = kid {
-        bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
-        bytes.extend_from_slice(&encode_bstr(kid));
-    }
-    bytes.extend_from_slice(&encode_cose_profile_id_label());
-    bytes.extend_from_slice(&encode_uint(profile_id));
     bytes
 }
 
@@ -691,13 +635,43 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_METHOD_URI, MAX_METHOD_URI_LEN, decode_cose_sign1,
-        decode_protected_header, detached_signature_protected_header,
-        encode_cose_artifact_type_label, encode_cose_method_uri_label, protected_header_bytes,
-        protected_header_bytes_for_alg, protected_header_bytes_with_profile_id,
-        sig_structure_bytes, sign_ed25519, sign1_bytes, sign1_detached_bytes,
-        substrate_protected_header, verify_ed25519_sign1,
+        CBOR_MAP_3, CBOR_MAP_4, COSE_LABEL_ALG, COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_KID,
+        COSE_LABEL_METHOD_URI, COSE_RETIRED_DISPATCH_LABEL_MAGNITUDE, MAX_METHOD_URI_LEN,
+        SUITE_ID_PHASE_1, decode_cose_sign1, decode_protected_header,
+        detached_signature_protected_header, encode_bstr, encode_cbor_negative_int,
+        encode_cose_artifact_type_label, encode_cose_method_uri_label, encode_cose_suite_id_label,
+        encode_uint, protected_header_bytes, protected_header_bytes_for_alg, sig_structure_bytes,
+        sign_ed25519, sign1_bytes, sign1_detached_bytes, substrate_protected_header,
+        verify_ed25519_sign1,
     };
+
+    fn missing_artifact_type_protected_header(kid: [u8; 16]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(32);
+        bytes.push(CBOR_MAP_3);
+        bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
+        bytes.extend_from_slice(&encode_cbor_negative_int(7));
+        bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
+        bytes.extend_from_slice(&encode_bstr(&kid));
+        bytes.extend_from_slice(&encode_cose_suite_id_label());
+        bytes.extend_from_slice(&encode_uint(SUITE_ID_PHASE_1));
+        bytes
+    }
+
+    fn retired_dispatch_protected_header(kid: [u8; 16], value: u64) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(40);
+        bytes.push(CBOR_MAP_4);
+        bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
+        bytes.extend_from_slice(&encode_cbor_negative_int(7));
+        bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
+        bytes.extend_from_slice(&encode_bstr(&kid));
+        bytes.extend_from_slice(&encode_cose_suite_id_label());
+        bytes.extend_from_slice(&encode_uint(SUITE_ID_PHASE_1));
+        bytes.extend_from_slice(&encode_cbor_negative_int(
+            COSE_RETIRED_DISPATCH_LABEL_MAGNITUDE,
+        ));
+        bytes.extend_from_slice(&encode_uint(value));
+        bytes
+    }
 
     #[test]
     fn decodes_detached_cose_sign1() {
@@ -774,8 +748,8 @@ mod tests {
     }
 
     #[test]
-    fn profile_id_protected_header_matches_allocated_wire_bytes() {
-        let protected = protected_header_bytes_with_profile_id([0x11; 16], 1);
+    fn retired_dispatch_label_header_matches_tombstone_wire_bytes() {
+        let protected = retired_dispatch_protected_header([0x11; 16], 1);
 
         assert_eq!(
             protected,
@@ -788,8 +762,8 @@ mod tests {
     }
 
     #[test]
-    fn profile_id_sig_structure_golden_vector() {
-        let protected = protected_header_bytes_with_profile_id([0x11; 16], 1);
+    fn retired_dispatch_label_sig_structure_stays_rejectable() {
+        let protected = retired_dispatch_protected_header([0x11; 16], 1);
         let sig_structure = sig_structure_bytes(&protected, b"payload");
 
         assert_eq!(
@@ -815,7 +789,6 @@ mod tests {
 
         assert_eq!(decoded.payload(), None);
         assert_eq!(decoded.suite_id(), Some(1));
-        assert_eq!(decoded.profile_id(), None);
         assert_eq!(
             decoded
                 .resolve_payload(Some(payload))
@@ -828,26 +801,26 @@ mod tests {
     }
 
     #[test]
-    fn decode_cose_sign1_rejects_retired_profile_id_label() {
-        let protected = protected_header_bytes_with_profile_id([0x11; 16], 1);
+    fn decode_cose_sign1_rejects_retired_dispatch_label() {
+        let protected = retired_dispatch_protected_header([0x11; 16], 1);
         let sign1 = sign1_detached_bytes(&protected, [0x22; 64]);
 
-        let error = decode_cose_sign1(&sign1).expect_err("profile_id must reject");
+        let error = decode_cose_sign1(&sign1).expect_err("retired label must reject");
 
         assert!(
-            error.to_string().contains("RetiredProfileIdPresent"),
+            error.to_string().contains("RetiredDispatchLabelPresent"),
             "unexpected error: {error}"
         );
     }
 
     #[test]
-    fn decode_protected_header_rejects_retired_profile_id_label() {
-        let protected = protected_header_bytes_with_profile_id([0x11; 16], 1);
+    fn decode_protected_header_rejects_retired_dispatch_label() {
+        let protected = retired_dispatch_protected_header([0x11; 16], 1);
 
-        let error = decode_protected_header(&protected).expect_err("profile_id must reject");
+        let error = decode_protected_header(&protected).expect_err("retired label must reject");
 
         assert!(
-            error.to_string().contains("RetiredProfileIdPresent"),
+            error.to_string().contains("RetiredDispatchLabelPresent"),
             "unexpected error: {error}"
         );
     }
@@ -1076,14 +1049,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_protected_header_handles_legacy_substrate_map_3_shape() {
-        // Pre-ADR-0109 substrate envelopes (MAP_3 from `protected_header_bytes`)
-        // carry alg+kid+suite_id only — no `artifact_type`. During the migration
-        // window the partial-decode helper must accept these bytes and surface
-        // suite_id without artifact_type. After cutover, callers tighten the
-        // contract by requiring `artifact_type`.
-        let legacy = protected_header_bytes([0x11; 16]);
-        let header = decode_protected_header(&legacy).expect("decode legacy MAP_3 substrate");
+    fn decode_protected_header_surfaces_missing_artifact_type() {
+        let bytes = missing_artifact_type_protected_header([0x11; 16]);
+        let header = decode_protected_header(&bytes).expect("decode structurally valid header");
 
         assert_eq!(header.alg, -8);
         assert_eq!(header.kid.as_deref(), Some(&[0x11u8; 16][..]));

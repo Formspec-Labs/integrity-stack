@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use integrity_bundle::read_stored_zip;
 use trellis_types::{
-    checkpoint_digest, map_lookup_array, map_lookup_bytes, map_lookup_fixed_bytes,
+    ArtifactType, checkpoint_digest, map_lookup_array, map_lookup_bytes, map_lookup_fixed_bytes,
     map_lookup_optional_map, map_lookup_u64, sha256_bytes,
 };
 
@@ -216,10 +216,16 @@ pub(crate) fn verify_export_zip_with_record_validator(
         }
     };
 
-    if manifest.alg != ALG_EDDSA || manifest.suite_id != SUITE_ID_PHASE_1_I128 {
+    if manifest.alg != ALG_EDDSA
+        || manifest.suite_id != SUITE_ID_PHASE_1_I128
+        || manifest.artifact_type != ArtifactType::Manifest
+    {
         return VerificationReport::fatal(
             VerificationFailureKind::UnsupportedSuite,
-            "manifest protected header does not match the Trellis Phase-1 suite",
+            format!(
+                "manifest protected header does not match the Trellis Phase-1 manifest suite; artifact_type={}",
+                manifest.artifact_type
+            ),
         );
     }
 
@@ -620,6 +626,18 @@ pub(crate) fn verify_export_zip_with_record_validator(
     let mut prior_checkpoint_digest: Option<[u8; 32]> = None;
     let mut head_checkpoint_root: Option<[u8; 32]> = None;
     for checkpoint in &checkpoints {
+        if checkpoint.alg != ALG_EDDSA
+            || checkpoint.suite_id != SUITE_ID_PHASE_1_I128
+            || checkpoint.artifact_type != ArtifactType::Checkpoint
+        {
+            return VerificationReport::fatal(
+                VerificationFailureKind::UnsupportedSuite,
+                format!(
+                    "checkpoint protected header does not match the Trellis Phase-1 checkpoint suite; artifact_type={}",
+                    checkpoint.artifact_type
+                ),
+            );
+        }
         let public_key = match registry.get(&checkpoint.kid) {
             Some(entry) => entry.public_key,
             None => {

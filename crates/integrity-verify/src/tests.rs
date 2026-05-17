@@ -2,7 +2,9 @@
 //! End-to-end tests for the universal verifier.
 
 use ed25519_dalek::{Signer, SigningKey};
-use integrity_cose::{protected_header_bytes, sig_structure_bytes, sign1_bytes};
+use integrity_cose::{
+    protected_header_bytes, sig_structure_bytes, sign1_bytes, substrate_protected_header,
+};
 
 use crate::{
     BundleEntryView, CanonicalDigestCheck, ChainEventView, ProfileRegistry,
@@ -40,7 +42,27 @@ fn build_signed_event(seed: [u8; 32], payload: &[u8]) -> (Vec<u8>, [u8; 32]) {
     (bytes, public_key)
 }
 
-fn build_retired_profile_event(seed: [u8; 32], payload: &[u8]) -> (Vec<u8>, [u8; 32]) {
+fn build_signed_event_with_protected(
+    seed: [u8; 32],
+    protected: Vec<u8>,
+    payload: &[u8],
+) -> (Vec<u8>, [u8; 32]) {
+    let signing_key = SigningKey::from_bytes(&seed);
+    let public_key = signing_key.verifying_key().to_bytes();
+    let sig_struct = sig_structure_bytes(&protected, payload);
+    let signature: ed25519_dalek::Signature = signing_key.sign(&sig_struct);
+    let bytes = sign1_bytes(&protected, payload, signature.to_bytes());
+    (bytes, public_key)
+}
+
+fn missing_artifact_type_protected_header() -> Vec<u8> {
+    vec![
+        0xa3, 0x01, 0x27, 0x04, 0x50, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+        0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x3a, 0x00, 0x01, 0x00, 0x00, 0x01,
+    ]
+}
+
+fn build_retired_dispatch_event(seed: [u8; 32], payload: &[u8]) -> (Vec<u8>, [u8; 32]) {
     let signing_key = SigningKey::from_bytes(&seed);
     let public_key = signing_key.verifying_key().to_bytes();
     let protected = vec![
@@ -52,6 +74,45 @@ fn build_retired_profile_event(seed: [u8; 32], payload: &[u8]) -> (Vec<u8>, [u8;
     let signature: ed25519_dalek::Signature = signing_key.sign(&sig_struct);
     let bytes = sign1_bytes(&protected, payload, signature.to_bytes());
     (bytes, public_key)
+}
+
+#[test]
+fn trellis_single_event_rejects_missing_artifact_type() {
+    let protected = missing_artifact_type_protected_header();
+    let (event_bytes, public_key) =
+        build_signed_event_with_protected([0x31; 32], protected, b"payload");
+    let error = crate::trellis::verify_single_event(public_key, &event_bytes)
+        .expect_err("Trellis event without artifact_type must fail closed");
+
+    assert!(
+        error.to_string().contains("ArtifactTypeMissing"),
+        "expected named artifact_type failure, got {error}"
+    );
+}
+
+#[test]
+fn trellis_single_event_rejects_wrong_artifact_type() {
+    let protected = substrate_protected_header(-8, &[0xab; 16], 1, "manifest");
+    let (event_bytes, public_key) =
+        build_signed_event_with_protected([0x32; 32], protected, b"payload");
+
+    let report = crate::trellis::verify_single_event(public_key, &event_bytes)
+        .expect("wrong artifact_type is a typed verification failure");
+
+    assert!(!report.structure_verified, "{report:?}");
+    assert!(
+        report.event_failures.iter().any(
+            |failure| failure.kind == crate::trellis::VerificationFailureKind::UnsupportedSuite
+        ),
+        "expected unsupported suite artifact_type failure, got {report:?}"
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("artifact_type=manifest")),
+        "expected warning to name mismatched artifact_type, got {report:?}"
+    );
 }
 
 #[test]
@@ -81,8 +142,8 @@ fn verify_universal_accepts_well_formed_event_with_default_profile() {
 }
 
 #[test]
-fn verify_universal_rejects_retired_profile_header_as_malformed() {
-    let (event_bytes, public_key) = build_retired_profile_event([0x02; 32], b"payload");
+fn verify_universal_rejects_retired_dispatch_label_as_malformed() {
+    let (event_bytes, public_key) = build_retired_dispatch_event([0x02; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -105,8 +166,8 @@ fn verify_universal_rejects_retired_profile_header_as_malformed() {
             .universal_failures
             .iter()
             .any(|f| f.kind == UniversalFailureKind::MalformedEnvelope
-                && f.message.contains("RetiredProfileIdPresent")),
-        "expected retired profile header to be malformed, got {report:?}"
+                && f.message.contains("RetiredDispatchLabelPresent")),
+        "expected retired dispatch label to be malformed, got {report:?}"
     );
 }
 
@@ -445,8 +506,8 @@ fn default_verifier_handles_post_adr_0109_envelopes() {
 }
 
 #[test]
-fn retired_profile_header_surfaces_as_malformed_envelope() {
-    let (event_bytes, public_key) = build_retired_profile_event([0xb1; 32], b"payload");
+fn retired_dispatch_label_surfaces_as_malformed_envelope() {
+    let (event_bytes, public_key) = build_retired_dispatch_event([0xb1; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -471,7 +532,7 @@ fn retired_profile_header_surfaces_as_malformed_envelope() {
         .find(|f| f.kind == UniversalFailureKind::MalformedEnvelope)
         .expect("expected MalformedEnvelope failure in report");
     assert!(
-        malformed.message.contains("RetiredProfileIdPresent"),
+        malformed.message.contains("RetiredDispatchLabelPresent"),
         "expected diagnostic to name retired label, got: {}",
         malformed.message
     );

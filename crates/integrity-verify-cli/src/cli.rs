@@ -606,10 +606,7 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
     use integrity_bundle::{Bundle, BundleEntry};
-    use integrity_cose::{
-        protected_header_bytes, protected_header_bytes_with_profile_id, sig_structure_bytes,
-        sign1_bytes,
-    };
+    use integrity_cose::{protected_header_bytes, sig_structure_bytes, sign1_bytes};
     use integrity_verify::{ProfileVerificationResult, ProfileVerifier};
 
     struct CliVerifier {
@@ -639,6 +636,14 @@ mod tests {
         let sig_struct = sig_structure_bytes(&protected_header, payload);
         let signature = signing_key.sign(&sig_struct);
         sign1_bytes(&protected_header, payload, signature.to_bytes())
+    }
+
+    fn retired_dispatch_header() -> Vec<u8> {
+        vec![
+            0xa4, 0x01, 0x27, 0x04, 0x50, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+            0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x3a, 0x00, 0x01, 0x00, 0x00, 0x01, 0x3a,
+            0x00, 0x01, 0x00, 0x02, 0x18, 0x63,
+        ]
     }
 
     fn test_bundle_path(name: &str) -> PathBuf {
@@ -730,13 +735,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_reports_retired_profile_id_cbor_as_failure() {
-        let retired_event = signed_event(
-            protected_header_bytes_with_profile_id([0xab; 16], 99),
-            b"payload",
+    fn verify_reports_retired_dispatch_label_as_failure() {
+        let retired_event = signed_event(retired_dispatch_header(), b"payload");
+        let bundle_path = write_test_bundle(
+            "retired-dispatch-label",
+            &[("events/0001.cbor", retired_event)],
         );
-        let bundle_path =
-            write_test_bundle("retired-profile-id", &[("events/0001.cbor", retired_event)]);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let registry = || ProfileRegistry::new();
@@ -755,10 +759,10 @@ mod tests {
         );
         let _ = std::fs::remove_file(&bundle_path);
 
-        let err = result.expect_err("retired profile_id must fail verification");
+        let err = result.expect_err("retired dispatch label must fail verification");
         let output = String::from_utf8(stdout).expect("stdout should be UTF-8");
         assert!(err.contains("universal_failures=1"), "{err}");
-        assert!(output.contains("RetiredProfileIdPresent"), "{output}");
+        assert!(output.contains("RetiredDispatchLabelPresent"), "{output}");
         assert!(
             output.contains("\"kind\": \"malformed_envelope\""),
             "{output}"
@@ -802,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_json_uses_verifier_id_not_profile_id() {
+    fn verify_json_uses_verifier_id() {
         let event = signed_event(protected_header_bytes([0xab; 16]), b"payload");
         let bundle_path = write_test_bundle("json-verifier-id", &[("events/0001.cbor", event)]);
         let mut stdout = Vec::new();
@@ -833,6 +837,6 @@ mod tests {
             output.contains("\"verifier_id\": \"cli-default\""),
             "{output}"
         );
-        assert!(!output.contains("profile_id"), "{output}");
+        assert!(!output.contains("retired_dispatch"), "{output}");
     }
 }

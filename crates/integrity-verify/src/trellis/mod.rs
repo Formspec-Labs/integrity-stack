@@ -30,7 +30,9 @@ use ed25519_dalek::{Signature, VerifyingKey};
 
 use integrity_cose::sig_structure_bytes;
 
-use trellis_types::{CONTENT_DOMAIN, CborHelperError, SUITE_ID_PHASE_1, domain_separated_sha256};
+use trellis_types::{
+    ArtifactType, CONTENT_DOMAIN, CborHelperError, SUITE_ID_PHASE_1, domain_separated_sha256,
+};
 
 /// Re-exports the universal verifier surface so downstream callers can
 /// reach `integrity-verify` without an extra direct dependency. The
@@ -505,11 +507,17 @@ pub(crate) fn verify_event_set_with_classes(
                 };
             }
         };
-        if event.alg != ALG_EDDSA || event.suite_id != SUITE_ID_PHASE_1_I128 {
+        if event.alg != ALG_EDDSA
+            || event.suite_id != SUITE_ID_PHASE_1_I128
+            || event.artifact_type != ArtifactType::Event
+        {
             return VerificationWithDomain {
                 trellis: VerificationReport::fatal(
                     VerificationFailureKind::UnsupportedSuite,
-                    "event protected header does not match the Trellis Phase-1 suite",
+                    format!(
+                        "event protected header does not match the Trellis Phase-1 event suite; artifact_type={}",
+                        event.artifact_type
+                    ),
                 ),
                 domain_findings: Vec::new(),
             };

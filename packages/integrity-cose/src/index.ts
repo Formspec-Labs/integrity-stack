@@ -3,7 +3,8 @@
 export const COSE_LABEL_ALG = 1;
 export const COSE_LABEL_KID = 4;
 export const COSE_LABEL_SUITE_ID = -65_537;
-export const COSE_LABEL_PROFILE_ID = -65_539;
+export const COSE_LABEL_ARTIFACT_TYPE = -65_538;
+const COSE_LABEL_RETIRED_DISPATCH_ID = -65_539;
 /**
  * Consumer detached-signature `method_uri` protected-header label (ADR 0109).
  *
@@ -15,8 +16,6 @@ export const COSE_LABEL_METHOD_URI = -65_540;
 export const COSE_SIGN1_TAG = 18;
 export const SUITE_ID_PHASE_1 = 1;
 export const MAX_METHOD_URI_LEN = 512;
-export const WOS_PROFILE_ID = 1;
-export const FORMSPEC_PROFILE_ID = 2;
 
 export interface CoseSign1 {
   protectedHeader: Map<number, unknown>;
@@ -27,11 +26,10 @@ export interface CoseSign1 {
   alg: number | null;
   kid: Uint8Array | null;
   suiteId: number | null;
-  profileId: number | null;
+  artifactType: string | null;
   /**
    * Consumer detached-signature method URI (COSE label `-65540`, ADR 0109).
-   * `null` on substrate envelopes (which never carry it) and on legacy
-   * profile_id-bearing envelopes that pre-date the surface split.
+   * `null` on substrate envelopes, which use `suite_id` and `artifact_type`.
    */
   methodUri: string | null;
 }
@@ -78,7 +76,7 @@ export function decodeCoseSign1(bytes: Uint8Array): CoseSign1 {
   if (!(protectedHeaderValue instanceof Map)) {
     throw new CoseError('protected header does not decode to a map');
   }
-  rejectRetiredProfileId(protectedHeaderValue);
+  rejectRetiredDispatchLabel(protectedHeaderValue);
   if (!(unprotectedValue instanceof Map)) {
     throw new CoseError('unprotected header is not a map');
   }
@@ -97,7 +95,7 @@ export function decodeCoseSign1(bytes: Uint8Array): CoseSign1 {
     alg: optionalIntegerLabel(protectedHeaderValue, COSE_LABEL_ALG),
     kid: optionalBytesLabel(protectedHeaderValue, COSE_LABEL_KID),
     suiteId: optionalUnsignedIntegerLabel(protectedHeaderValue, COSE_LABEL_SUITE_ID),
-    profileId: null,
+    artifactType: optionalTextLabel(protectedHeaderValue, COSE_LABEL_ARTIFACT_TYPE),
     methodUri: optionalTextLabel(
       protectedHeaderValue,
       COSE_LABEL_METHOD_URI,
@@ -150,33 +148,6 @@ export function extractMethodUri(bytes: Uint8Array, expectedPrefix: string): str
   return decodeCoseSign1WithMethodUri(bytes, expectedPrefix).methodUri;
 }
 
-export function decodeCoseSign1WithProfileId(
-  bytes: Uint8Array,
-  expectedProfileId: number,
-  profileName = 'profile',
-): CoseSign1 {
-  const cose = decodeCoseSign1(bytes);
-  if (cose.profileId === null) {
-    throw new CoseError(
-      `missing ${profileName} profile_id protected header (label ${COSE_LABEL_PROFILE_ID})`,
-    );
-  }
-  if (cose.profileId !== expectedProfileId) {
-    throw new CoseError(
-      `wrong ${profileName} profile_id: expected ${expectedProfileId}, got ${cose.profileId}`,
-    );
-  }
-  return cose;
-}
-
-export function decodeFormspecCoseSign1(bytes: Uint8Array): CoseSign1 {
-  return decodeCoseSign1WithProfileId(bytes, FORMSPEC_PROFILE_ID, 'Formspec');
-}
-
-export function extractFormspecProfileId(bytes: Uint8Array): number {
-  return decodeFormspecCoseSign1(bytes).profileId ?? unreachableProfileId();
-}
-
 export function resolvePayload(cose: CoseSign1, detachedPayload?: Uint8Array): Uint8Array {
   if (cose.payload === null) {
     if (!detachedPayload) {
@@ -207,24 +178,6 @@ export function protectedHeaderBytesForAlg(alg: number, kid?: Uint8Array): Uint8
     chunks.push(encodeInt(COSE_LABEL_KID), encodeBytes(kid));
   }
   return concatBytes(...chunks);
-}
-
-export function protectedHeaderBytesForAlgWithProfileId(
-  alg: number,
-  kid: Uint8Array | undefined,
-  profileId: number,
-): Uint8Array {
-  const fields = kid !== undefined ? 3 : 2;
-  const chunks = [encodeMajorLen(5, fields), encodeInt(COSE_LABEL_ALG), encodeInt(alg)];
-  if (kid !== undefined) {
-    chunks.push(encodeInt(COSE_LABEL_KID), encodeBytes(kid));
-  }
-  chunks.push(encodeInt(COSE_LABEL_PROFILE_ID), encodeInt(profileId));
-  return concatBytes(...chunks);
-}
-
-export function protectedHeaderBytesForFormspec(alg: number, kid?: Uint8Array): Uint8Array {
-  return protectedHeaderBytesForAlgWithProfileId(alg, kid, FORMSPEC_PROFILE_ID);
 }
 
 /**
@@ -263,21 +216,14 @@ export function protectedHeaderBytesWithSuiteId(
   if (kid.byteLength !== 16) {
     throw new CoseError('kid must be 16 bytes');
   }
-  return concatBytes(
-    new Uint8Array([0xa3]),
-    encodeInt(COSE_LABEL_ALG),
-    encodeInt(-8),
-    encodeInt(COSE_LABEL_KID),
-    encodeBytes(kid),
-    encodeInt(COSE_LABEL_SUITE_ID),
-    encodeInt(suiteId),
-  );
+  return substrateProtectedHeader(-8, kid, suiteId, 'event');
 }
 
-export function protectedHeaderBytesWithProfileId(
+export function substrateProtectedHeader(
+  alg: number,
   kid: Uint8Array,
-  profileId: number,
-  suiteId = SUITE_ID_PHASE_1,
+  suiteId: number,
+  artifactType: string,
 ): Uint8Array {
   if (kid.byteLength !== 16) {
     throw new CoseError('kid must be 16 bytes');
@@ -285,13 +231,13 @@ export function protectedHeaderBytesWithProfileId(
   return concatBytes(
     new Uint8Array([0xa4]),
     encodeInt(COSE_LABEL_ALG),
-    encodeInt(-8),
+    encodeInt(alg),
     encodeInt(COSE_LABEL_KID),
     encodeBytes(kid),
     encodeInt(COSE_LABEL_SUITE_ID),
     encodeInt(suiteId),
-    encodeInt(COSE_LABEL_PROFILE_ID),
-    encodeInt(profileId),
+    encodeInt(COSE_LABEL_ARTIFACT_TYPE),
+    encodeText(artifactType),
   );
 }
 
@@ -374,16 +320,12 @@ function optionalTextLabel(
   return value;
 }
 
-function rejectRetiredProfileId(map: Map<CborValue, CborValue>): void {
-  if (map.has(COSE_LABEL_PROFILE_ID)) {
+function rejectRetiredDispatchLabel(map: Map<CborValue, CborValue>): void {
+  if (map.has(COSE_LABEL_RETIRED_DISPATCH_ID)) {
     throw new CoseError(
-      'RetiredProfileIdPresent: retired profile_id protected-header label -65539 is present',
+      'RetiredDispatchLabelPresent: retired protected-header label -65539 is present',
     );
   }
-}
-
-function unreachableProfileId(): never {
-  throw new CoseError('decodeFormspecCoseSign1 did not return profile_id');
 }
 
 function asBytes(value: CborValue, field: string): Uint8Array {
