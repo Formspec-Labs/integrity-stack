@@ -532,7 +532,11 @@ impl RingVerifier {
                     ));
                 }
                 if cose.alg() != Some(i128::from(alg)) {
-                    return Ok(self.failed_receipt(request, registry));
+                    return Ok(self.unsupported_receipt_with_reason(
+                        request,
+                        registry,
+                        format!("cose alg mismatch: expected {}, got {:?}", alg, cose.alg()),
+                    ));
                 }
                 // kid-binding (fs-skj0). Only applicable to KeyRef::Kid —
                 // RawPublicKey skips because there is no identifier to bind.
@@ -1079,6 +1083,35 @@ mod tests {
         assert!(
             receipt.is_unsupported(),
             "method_uri mismatch must reject before invalid signature bytes produce Failed"
+        );
+    }
+
+    #[test]
+    fn registered_method_with_wrong_cose_alg_returns_unsupported() {
+        let verifier = test_verifier();
+        let registry = test_registry();
+        let protected = integrity_cose::detached_signature_protected_header(
+            -7,
+            b"test-kid",
+            "urn:formspec:sig-method:ed25519-cose-sign1@1",
+        );
+        let signature_bytes = integrity_cose::encode_cose_sign1(&protected, None, &[0u8; 64]);
+
+        let receipt = verifier
+            .verify(
+                &VerifyRequest {
+                    signed_bytes: b"test message".to_vec(),
+                    signature_bytes,
+                    method_uri: "urn:formspec:sig-method:ed25519-cose-sign1@1".into(),
+                    key_ref: KeyRef::RawPublicKey(vec![0u8; 32]),
+                },
+                &registry,
+            )
+            .expect("alg mismatch should reach an unsupported verdict");
+
+        assert!(
+            receipt.is_unsupported(),
+            "COSE alg mismatch must reject before invalid signature bytes produce Failed"
         );
     }
 
