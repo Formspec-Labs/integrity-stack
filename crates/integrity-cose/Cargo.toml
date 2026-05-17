@@ -14,5 +14,6 @@ integrity-seam = { path = "../integrity-seam" }
 sha2 = "0.10"
 
 [dev-dependencies]
+proptest = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }

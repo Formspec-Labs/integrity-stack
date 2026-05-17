@@ -633,6 +633,7 @@ fn encode_i128(value: i128) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey};
+    use proptest::prelude::*;
 
     use super::{
         CBOR_MAP_3, CBOR_MAP_4, COSE_LABEL_ALG, COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_KID,
@@ -671,6 +672,27 @@ mod tests {
         ));
         bytes.extend_from_slice(&encode_uint(value));
         bytes
+    }
+
+    proptest! {
+        #[test]
+        fn retired_dispatch_label_rejects_for_any_uint_value(kid in any::<[u8; 16]>(), value in any::<u64>()) {
+            let protected = retired_dispatch_protected_header(kid, value);
+            let header_error = decode_protected_header(&protected)
+                .expect_err("retired dispatch label must reject during header inspection");
+            prop_assert!(
+                header_error.to_string().contains("RetiredDispatchLabelPresent"),
+                "unexpected header error: {header_error}"
+            );
+
+            let sign1 = sign1_bytes(&protected, b"payload", [0u8; 64]);
+            let sign1_error = decode_cose_sign1(&sign1)
+                .expect_err("retired dispatch label must reject during full COSE decode");
+            prop_assert!(
+                sign1_error.to_string().contains("RetiredDispatchLabelPresent"),
+                "unexpected COSE error: {sign1_error}"
+            );
+        }
     }
 
     #[test]

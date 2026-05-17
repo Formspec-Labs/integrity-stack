@@ -871,6 +871,7 @@ dependencies = [
  "hex",
  "integrity-cbor",
  "integrity-seam",
+ "proptest",
  "serde_json",
  "sha2",
  "tokio",
