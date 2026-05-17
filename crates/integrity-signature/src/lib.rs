@@ -451,7 +451,7 @@ pub struct VerifyRequest {
     /// Signature envelope bytes.
     pub signature_bytes: Vec<u8>,
     /// Signature method URI expected by the consumer.
-    pub signature_method: Uri,
+    pub method_uri: Uri,
     /// Key reference selected by the caller.
     pub key_ref: KeyRef,
 }
@@ -582,6 +582,26 @@ mod tests {
         let roundtripped: VerificationReceipt = serde_json::from_str(&json).expect("deserialize");
         let json2 = serde_json::to_string(&roundtripped).expect("re-serialize");
         assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn verify_request_serializes_method_uri_not_signature_method() {
+        let request = VerifyRequest {
+            signed_bytes: vec![1, 2, 3],
+            signature_bytes: vec![4, 5, 6],
+            method_uri: "urn:formspec:sig-method:ed25519-cose-sign1@1".into(),
+            key_ref: KeyRef::Kid(b"kid-1".to_vec()),
+        };
+
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(
+            json.get("methodUri").and_then(serde_json::Value::as_str),
+            Some("urn:formspec:sig-method:ed25519-cose-sign1@1")
+        );
+        assert!(
+            json.get("signatureMethod").is_none(),
+            "ADR 0109 removed the retired JSON signatureMethod mirror"
+        );
     }
 
     #[test]
