@@ -1,0 +1,19 @@
+[package]
+name = "integrity-cose-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+integrity-cose = { path = "../crates/integrity-cose" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "protected_header"
+path = "fuzz_targets/protected_header.rs"
+test = false
+doc = false
+bench = false

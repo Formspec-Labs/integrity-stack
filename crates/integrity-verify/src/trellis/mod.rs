@@ -323,7 +323,21 @@ pub fn verify_tampered_ledger_with_validator(
             return Err(error);
         }
     };
-    let events = parse_sign1_array(ledger).unwrap_or_else(|_| Vec::new());
+    let events = match parse_sign1_array(ledger) {
+        Ok(events) => events,
+        Err(error) => {
+            return Ok(VerificationWithDomain {
+                trellis: VerificationReport::fatal(
+                    error.kind().map_or(
+                        VerificationFailureKind::MalformedCose,
+                        VerifyErrorKind::verification_failure_kind,
+                    ),
+                    error.to_string(),
+                ),
+                domain_findings: Vec::new(),
+            });
+        }
+    };
     if events.is_empty() {
         return Ok(VerificationWithDomain {
             trellis: VerificationReport::fatal(

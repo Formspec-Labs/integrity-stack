@@ -37,8 +37,14 @@ pub(crate) fn parse_sign1_bytes(bytes: &[u8]) -> Result<ParsedSign1, VerifyError
 }
 
 pub(crate) fn parse_sign1_value(value: &Value) -> Result<ParsedSign1, VerifyError> {
-    let sign1 = integrity_cose::decode_cose_sign1_value(value)
-        .map_err(|error| VerifyError::new(error.to_string()))?;
+    let sign1 = integrity_cose::decode_cose_sign1_value(value).map_err(|error| {
+        let message = error.to_string();
+        if message.contains("RetiredDispatchLabelPresent") {
+            VerifyError::with_kind(message, VerifyErrorKind::MalformedCose)
+        } else {
+            VerifyError::new(message)
+        }
+    })?;
     let kid = sign1
         .kid()
         .map(<[u8]>::to_vec)

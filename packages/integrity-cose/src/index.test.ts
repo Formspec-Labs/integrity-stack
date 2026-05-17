@@ -1,4 +1,7 @@
 /** @filedesc Unit tests for the TypeScript integrity COSE package. */
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   COSE_LABEL_ARTIFACT_TYPE,
@@ -16,6 +19,12 @@ import {
   sigStructureBytes,
   substrateProtectedHeader,
 } from './index';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const stackRoot = resolve(__dirname, '../../../..');
+const adr0109TamperRoot = resolve(stackRoot, 'trellis/fixtures/vectors/tamper');
+const hasAdr0109TamperFixtures = existsSync(adr0109TamperRoot);
+const adr0109FixtureIt = hasAdr0109TamperFixtures ? it : it.skip;
 
 describe('COSE_Sign1 helpers', () => {
   function retiredDispatchProtectedHeader(): Uint8Array {
@@ -84,6 +93,26 @@ describe('COSE_Sign1 helpers', () => {
   it('decodeCoseSign1 rejects the retired dispatch label', () => {
     const protectedHeader = retiredDispatchProtectedHeader();
     const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    expect(() => decodeCoseSign1(encoded)).toThrow(/RetiredDispatchLabelPresent/);
+  });
+
+  adr0109FixtureIt('classifies the committed unknown artifact_type tamper fixture', () => {
+    const encoded = readFileSync(
+      resolve(adr0109TamperRoot, '053-unknown-artifact-type/input-tampered-event.cbor'),
+    );
+    const decoded = decodeCoseSign1(encoded);
+
+    expect(decoded.artifactType).toBe('x-adr0109-unknown');
+    expect(new Set(['event', 'checkpoint', 'manifest']).has(decoded.artifactType ?? '')).toBe(
+      false,
+    );
+  });
+
+  adr0109FixtureIt('rejects the committed retired dispatch-label tamper fixture', () => {
+    const encoded = readFileSync(
+      resolve(adr0109TamperRoot, '054-retired-dispatch-label/input-tampered-event.cbor'),
+    );
 
     expect(() => decodeCoseSign1(encoded)).toThrow(/RetiredDispatchLabelPresent/);
   });
