@@ -12,8 +12,8 @@ use super::{
     ATTACHMENT_EVENT_EXTENSION, ATTACHMENT_EXPORT_EXTENSION, CERTIFICATE_EVENT_EXTENSION,
     CERTIFICATE_EXPORT_EXTENSION, ERASURE_EVIDENCE_EVENT_EXTENSION,
     ERASURE_EVIDENCE_EXPORT_EXTENSION, OPEN_CLOCKS_EXPORT_EXTENSION, RESERVED_NON_SIGNING_KIND,
-    SUPERSEDES_CHAIN_ID_EVENT_EXTENSION, SUPERSESSION_GRAPH_EXPORT_EXTENSION,
-    USER_CONTENT_ATTESTATION_EVENT_EXTENSION,
+    SEAL_FENCE_EXPORT_EXTENSION, SUPERSEDES_CHAIN_ID_EVENT_EXTENSION,
+    SUPERSESSION_GRAPH_EXPORT_EXTENSION, USER_CONTENT_ATTESTATION_EVENT_EXTENSION,
 };
 use crate::trellis::kinds::{VerificationFailureKind, VerifyErrorKind};
 use crate::trellis::merkle::recompute_canonical_event_hash;
@@ -1013,6 +1013,58 @@ pub(crate) fn parse_open_clocks_export_extension(
             32,
         )?),
         open_clock_count: map_lookup_u64(extension_map, "open_clock_count")?,
+    }))
+}
+
+pub(crate) fn parse_seal_fence_export_extension(
+    manifest_map: &[(Value, Value)],
+) -> Result<Option<SealFenceExportExtension>, VerifyError> {
+    let Some(extensions) = map_lookup_optional_map(manifest_map, "extensions")? else {
+        return Ok(None);
+    };
+    let Some(extension_value) = map_lookup_optional_value(extensions, SEAL_FENCE_EXPORT_EXTENSION)
+    else {
+        return Ok(None);
+    };
+    let extension_map = extension_value
+        .as_map()
+        .ok_or_else(|| VerifyError::new("seal fence export extension is not a map"))?;
+    let identity_rule = map_lookup_text(extension_map, "identity_rule")?;
+    if identity_rule != "trellis-export-seal-fence-v1" {
+        return Err(VerifyError::new(
+            "seal fence export extension identity_rule is unsupported",
+        ));
+    }
+    let policy_closure_digest = match map_lookup_optional_value(
+        extension_map,
+        "policy_closure_digest",
+    ) {
+        Some(Value::Null) => None,
+        Some(Value::Bytes(bytes)) if bytes.len() == 32 => Some(bytes_array(bytes)),
+        Some(_) => {
+            return Err(VerifyError::new(
+                "seal fence export extension policy_closure_digest must be null or bstr .size 32",
+            ));
+        }
+        None => {
+            return Err(VerifyError::new(
+                "seal fence export extension policy_closure_digest is required",
+            ));
+        }
+    };
+    Ok(Some(SealFenceExportExtension {
+        bundle_scope: map_lookup_bytes(extension_map, "bundle_scope")?,
+        export_attempt_id: map_lookup_text(extension_map, "export_attempt_id")?,
+        seal_version: map_lookup_u64(extension_map, "seal_version")?,
+        event_count: map_lookup_u64(extension_map, "event_count")?,
+        high_water_sequence: map_lookup_u64(extension_map, "high_water_sequence")?,
+        head_checkpoint_digest: bytes_array(&map_lookup_fixed_bytes(
+            extension_map,
+            "head_checkpoint_digest",
+            32,
+        )?),
+        events_digest: bytes_array(&map_lookup_fixed_bytes(extension_map, "events_digest", 32)?),
+        policy_closure_digest,
     }))
 }
 

@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use integrity_bundle::read_stored_zip;
 use trellis_types::{
-    ArtifactType, checkpoint_digest, map_lookup_array, map_lookup_bytes, map_lookup_fixed_bytes,
-    map_lookup_optional_map, map_lookup_u64, sha256_bytes,
+    ArtifactType, checkpoint_digest, domain_separated_sha256, encode_canonical_cbor_value,
+    map_lookup_array, map_lookup_bytes, map_lookup_fixed_bytes, map_lookup_optional_map,
+    map_lookup_u64, sha256_bytes,
 };
 
 use super::{
@@ -27,13 +28,16 @@ use crate::trellis::parse::{
     decode_event_details, decode_value, event_identity, map_lookup_timestamp,
     parse_attachment_export_extension, parse_attachment_manifest_entries, parse_bound_registry,
     parse_certificate_export_extension, parse_erasure_evidence_export_extension,
-    parse_key_registry, parse_open_clocks_export_extension, parse_sign1_array, parse_sign1_bytes,
-    parse_supersession_graph_export_extension, readable_payload_bytes,
+    parse_key_registry, parse_open_clocks_export_extension, parse_seal_fence_export_extension,
+    parse_sign1_array, parse_sign1_bytes, parse_supersession_graph_export_extension,
+    readable_payload_bytes,
 };
 use crate::trellis::supersession::{verify_supersession_graph, verify_unbound_supersession_graph};
 use crate::trellis::types::*;
 use crate::trellis::util::{binding_lineage_graph_has_cycle, bytes_array, hex_decode, hex_string};
-use crate::trellis::{DomainEvent, DomainExport, RecordValidator, VerificationWithDomain};
+use crate::trellis::{
+    DomainEvent, DomainExport, EXPORT_ATTEMPT_DOMAIN, RecordValidator, VerificationWithDomain,
+};
 
 /// Verifies a complete export ZIP.
 pub fn verify_export_zip_with_validator(
@@ -445,6 +449,9 @@ pub(crate) fn verify_export_zip_with_record_validator(
             );
         }
     };
+    if let Err(message) = verify_seal_fence_extension(manifest_map, &scope, &events, &archive) {
+        return VerificationReport::fatal(VerificationFailureKind::ManifestPayloadInvalid, message);
+    }
     let payload_blobs = archive
         .members
         .iter()
@@ -984,6 +991,351 @@ pub(crate) fn verify_export_zip_with_record_validator(
     );
     report.readability_verified = true;
     report
+}
+
+fn verify_seal_fence_extension(
+    manifest_map: &[(ciborium::Value, ciborium::Value)],
+    scope: &[u8],
+    events: &[ParsedSign1],
+    archive: &ExportArchive,
+) -> Result<(), String> {
+    let extension = parse_seal_fence_export_extension(manifest_map)
+        .map_err(|error| format!("seal fence export extension is invalid: {error}"))?;
+    let Some(extension) = extension else {
+        return Ok(());
+    };
+    if extension.bundle_scope != scope {
+        return Err(
+            "seal fence export extension bundle_scope does not match manifest scope".into(),
+        );
+    }
+    if extension.seal_version == 0 {
+        return Err("seal fence export extension seal_version must be positive".into());
+    }
+    let manifest_tree_size =
+        map_lookup_u64(manifest_map, "tree_size").map_err(|error| error.to_string())?;
+    if extension.event_count != manifest_tree_size {
+        return Err(format!(
+            "seal fence export extension event_count {} does not match manifest tree_size {manifest_tree_size}",
+            extension.event_count
+        ));
+    }
+    let event_count =
+        u64::try_from(events.len()).map_err(|_| "seal fence event count exceeds u64")?;
+    if extension.event_count != event_count {
+        return Err(format!(
+            "seal fence export extension event_count {} does not match events member count {event_count}",
+            extension.event_count
+        ));
+    }
+    let high_water_event = events
+        .last()
+        .ok_or_else(|| "seal fence export extension requires at least one event".to_string())?;
+    let high_water_details =
+        decode_event_details(high_water_event).map_err(|error| error.to_string())?;
+    if extension.high_water_sequence != high_water_details.sequence {
+        return Err(format!(
+            "seal fence export extension high_water_sequence {} does not match final event sequence {}",
+            extension.high_water_sequence, high_water_details.sequence
+        ));
+    }
+    let expected_count = high_water_details
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| "seal fence high-water sequence overflows event count".to_string())?;
+    if extension.event_count != expected_count {
+        return Err(format!(
+            "seal fence export extension event_count {} does not match high-water sequence {}",
+            extension.event_count, extension.high_water_sequence
+        ));
+    }
+    let expected_export_attempt_id = export_attempt_id(
+        &extension.bundle_scope,
+        extension.seal_version,
+        extension.high_water_sequence,
+        high_water_details.canonical_event_hash,
+    )?;
+    if extension.export_attempt_id != expected_export_attempt_id {
+        return Err(format!(
+            "seal fence export extension export_attempt_id {} does not match deterministic identity {expected_export_attempt_id}",
+            extension.export_attempt_id
+        ));
+    }
+    let manifest_head_checkpoint_digest = bytes_array(
+        &map_lookup_fixed_bytes(manifest_map, "head_checkpoint_digest", 32)
+            .map_err(|error| error.to_string())?,
+    );
+    if extension.head_checkpoint_digest != manifest_head_checkpoint_digest {
+        return Err(
+            "seal fence export extension head_checkpoint_digest does not match manifest".into(),
+        );
+    }
+    let manifest_events_digest = bytes_array(
+        &map_lookup_fixed_bytes(manifest_map, "events_digest", 32)
+            .map_err(|error| error.to_string())?,
+    );
+    if extension.events_digest != manifest_events_digest {
+        return Err("seal fence export extension events_digest does not match manifest".into());
+    }
+    let actual_events_digest = archive
+        .members
+        .get("010-events.cbor")
+        .map(|bytes| sha256_bytes(bytes))
+        .ok_or_else(|| "seal fence export extension cannot resolve events member".to_string())?;
+    if extension.events_digest != actual_events_digest {
+        return Err(
+            "seal fence export extension events_digest does not match events member".into(),
+        );
+    }
+    let actual_policy_closure_digest = archive
+        .members
+        .get("067-policy-closure.cbor")
+        .map(|bytes| sha256_bytes(bytes));
+    if extension.policy_closure_digest != actual_policy_closure_digest {
+        return Err(
+            "seal fence export extension policy_closure_digest does not match closure member"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn export_attempt_id(
+    scope: &[u8],
+    seal_version: u64,
+    high_water_sequence: u64,
+    high_water_event_hash: [u8; 32],
+) -> Result<String, String> {
+    let material = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("bundle_scope".to_string()),
+            ciborium::Value::Bytes(scope.to_vec()),
+        ),
+        (
+            ciborium::Value::Text("seal_version".to_string()),
+            ciborium::Value::Integer(seal_version.into()),
+        ),
+        (
+            ciborium::Value::Text("high_water_sequence".to_string()),
+            ciborium::Value::Integer(high_water_sequence.into()),
+        ),
+        (
+            ciborium::Value::Text("high_water_event_hash".to_string()),
+            ciborium::Value::Bytes(high_water_event_hash.to_vec()),
+        ),
+    ]);
+    let bytes = encode_canonical_cbor_value(&material).map_err(|error| error.to_string())?;
+    let digest = domain_separated_sha256(EXPORT_ATTEMPT_DOMAIN, &bytes);
+    Ok(format!("sha256:{}", hex_string(&digest)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use ciborium::Value;
+    use integrity_bundle::{Bundle, BundleEntry, read_stored_zip};
+    use integrity_cose::{
+        decode_cose_sign1, sig_structure_bytes, sign_ed25519, sign1_bytes,
+        substrate_protected_header,
+    };
+    use trellis_export_writer::{
+        ExportSealFence, SigningKeyMaterial as WriterSigningKey, export_001_writer_input,
+        write_export,
+    };
+    use trellis_types::{
+        ArtifactType, EVENT_DOMAIN, SUITE_ID_PHASE_1, domain_separated_sha256, encode_bstr,
+        encode_canonical_cbor_value, encode_tstr, encode_uint,
+    };
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum SealFenceTamper {
+        IdentityRule,
+        ExportAttemptId,
+        EventsDigest,
+        HeadCheckpointDigest,
+        PolicyClosureDigest,
+    }
+
+    #[test]
+    fn verify_export_zip_rejects_tampered_seal_fence_fields() {
+        let cases = [
+            (
+                SealFenceTamper::IdentityRule,
+                "identity_rule is unsupported",
+            ),
+            (
+                SealFenceTamper::ExportAttemptId,
+                "export_attempt_id sha256:wrong",
+            ),
+            (
+                SealFenceTamper::EventsDigest,
+                "events_digest does not match manifest",
+            ),
+            (
+                SealFenceTamper::HeadCheckpointDigest,
+                "head_checkpoint_digest does not match manifest",
+            ),
+            (
+                SealFenceTamper::PolicyClosureDigest,
+                "policy_closure_digest does not match closure member",
+            ),
+        ];
+
+        for (tamper, expected_warning) in cases {
+            let (zip_bytes, signing_key) = sealed_export_package();
+            let tampered = tamper_manifest_seal_fence(&zip_bytes, &signing_key, tamper);
+
+            let report = verify_export_zip(&tampered);
+
+            assert!(
+                !report.structure_verified,
+                "{tamper:?} should fail structure verification: {report:#?}"
+            );
+            assert_eq!(
+                report.event_failures.first().map(|failure| failure.kind),
+                Some(VerificationFailureKind::ManifestPayloadInvalid),
+                "{tamper:?} should fail as manifest payload invalid: {report:#?}"
+            );
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(expected_warning)),
+                "{tamper:?} should include {expected_warning:?}: {report:#?}"
+            );
+        }
+    }
+
+    fn sealed_export_package() -> (Vec<u8>, WriterSigningKey) {
+        let mut input = export_001_writer_input(&fixtures_root());
+        let event_count = u64::try_from(input.events.len()).expect("fixture event count fits u64");
+        let high_water_event = input.events.last().expect("fixture has events");
+        let high_water_sequence = high_water_event.sequence();
+        let high_water_event_hash =
+            canonical_event_hash(&input.scope, high_water_event.canonical_event());
+        let export_attempt_id = export_attempt_id(
+            &input.scope,
+            event_count,
+            high_water_sequence,
+            high_water_event_hash,
+        )
+        .expect("export attempt id");
+        input.seal_fence = Some(ExportSealFence {
+            bundle_scope: input.scope.clone(),
+            export_attempt_id,
+            seal_version: event_count,
+            event_count,
+            high_water_sequence,
+        });
+        let signing_key = input.signing_key.clone();
+        let package = write_export(input).expect("write sealed export");
+        let report = verify_export_zip(&package.zip_bytes);
+        assert!(
+            report.structure_verified && report.integrity_verified,
+            "fixture sealed export should verify: {report:#?}"
+        );
+        (package.zip_bytes, signing_key)
+    }
+
+    fn tamper_manifest_seal_fence(
+        zip_bytes: &[u8],
+        signing_key: &WriterSigningKey,
+        tamper: SealFenceTamper,
+    ) -> Vec<u8> {
+        let entries = read_stored_zip(zip_bytes).expect("read fixture export ZIP");
+        let mut bundle = Bundle::new();
+        for entry in entries {
+            let bytes = if entry.path().ends_with("000-manifest.cbor") {
+                resign_tampered_manifest(entry.bytes(), signing_key, tamper)
+            } else {
+                entry.bytes().to_vec()
+            };
+            bundle.add_entry(BundleEntry::new(entry.path().to_string(), bytes));
+        }
+        bundle.to_zip_bytes().expect("rebuild tampered ZIP")
+    }
+
+    fn resign_tampered_manifest(
+        manifest_bytes: &[u8],
+        signing_key: &WriterSigningKey,
+        tamper: SealFenceTamper,
+    ) -> Vec<u8> {
+        let sign1 = decode_cose_sign1(manifest_bytes).expect("decode manifest sign1");
+        let payload = sign1.payload().expect("manifest payload is embedded");
+        let mut manifest =
+            trellis_types::decode_cbor_value(payload).expect("decode manifest payload");
+        let manifest_map = value_map_mut(&mut manifest);
+        let extensions = value_map_mut(map_entry_mut(manifest_map, "extensions"));
+        let seal_fence = value_map_mut(map_entry_mut(extensions, "trellis.export.seal-fence.v1"));
+        match tamper {
+            SealFenceTamper::IdentityRule => {
+                *map_entry_mut(seal_fence, "identity_rule") =
+                    Value::Text("trellis-export-seal-fence-test".to_string());
+            }
+            SealFenceTamper::ExportAttemptId => {
+                *map_entry_mut(seal_fence, "export_attempt_id") =
+                    Value::Text("sha256:wrong".to_string());
+            }
+            SealFenceTamper::EventsDigest => {
+                *map_entry_mut(seal_fence, "events_digest") = Value::Bytes(vec![0xaa; 32]);
+            }
+            SealFenceTamper::HeadCheckpointDigest => {
+                *map_entry_mut(seal_fence, "head_checkpoint_digest") = Value::Bytes(vec![0xbb; 32]);
+            }
+            SealFenceTamper::PolicyClosureDigest => {
+                *map_entry_mut(seal_fence, "policy_closure_digest") = Value::Bytes(vec![0xcc; 32]);
+            }
+        }
+
+        let payload_bytes =
+            encode_canonical_cbor_value(&manifest).expect("canonical manifest payload");
+        let protected = substrate_protected_header(
+            -8,
+            &signing_key.kid(),
+            SUITE_ID_PHASE_1,
+            ArtifactType::Manifest.cose_value(),
+        );
+        let signature = sign_ed25519(
+            signing_key.private_seed,
+            &sig_structure_bytes(&protected, &payload_bytes),
+        );
+        sign1_bytes(&protected, &payload_bytes, signature)
+    }
+
+    fn value_map_mut(value: &mut Value) -> &mut Vec<(Value, Value)> {
+        match value {
+            Value::Map(entries) => entries,
+            _ => panic!("expected CBOR map"),
+        }
+    }
+
+    fn map_entry_mut<'a>(map: &'a mut [(Value, Value)], key: &str) -> &'a mut Value {
+        map.iter_mut()
+            .find(|(entry_key, _)| entry_key.as_text() == Some(key))
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("missing map key {key}"))
+    }
+
+    fn canonical_event_hash(scope: &[u8], canonical_event_bytes: &[u8]) -> [u8; 32] {
+        let mut preimage = Vec::new();
+        preimage.push(0xa3);
+        preimage.extend_from_slice(&encode_tstr("version"));
+        preimage.extend_from_slice(&encode_uint(1));
+        preimage.extend_from_slice(&encode_tstr("ledger_scope"));
+        preimage.extend_from_slice(&encode_bstr(scope));
+        preimage.extend_from_slice(&encode_tstr("event_payload"));
+        preimage.extend_from_slice(canonical_event_bytes);
+        domain_separated_sha256(EVENT_DOMAIN, &preimage)
+    }
+
+    fn fixtures_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("trellis/fixtures/vectors")
+    }
 }
 
 #[cfg(test)]

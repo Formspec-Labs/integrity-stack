@@ -147,6 +147,13 @@ const SUPERSESSION_GRAPH_EXPORT_EXTENSION: &str = "trellis.export.supersession-g
 /// ADR 0067 / Core §18.3c manifest extension binding `open-clocks.json`.
 const OPEN_CLOCKS_EXPORT_EXTENSION: &str = "trellis.export.open-clocks.v1";
 
+/// Core §18.3e manifest extension binding a published bundle to its export
+/// attempt identity and sealed high-water fence.
+const SEAL_FENCE_EXPORT_EXTENSION: &str = "trellis.export.seal-fence.v1";
+
+/// Core §18.3e domain-separation tag for deterministic export attempts.
+const EXPORT_ATTEMPT_DOMAIN: &str = "trellis-export-attempt-v1";
+
 /// ADR 0010 §9.8 / Core §9 — domain-separation tag for the Ed25519 signature
 /// preimage carried by `UserContentAttestationPayload.signature`. Distinct
 /// from `trellis-transition-attestation-v1` so a wrongly-typed user-content

@@ -832,6 +832,19 @@ pub(crate) struct OpenClocksExportExtension {
     pub(crate) open_clock_count: u64,
 }
 
+/// Optional `trellis.export.seal-fence.v1` manifest extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SealFenceExportExtension {
+    pub(crate) bundle_scope: Vec<u8>,
+    pub(crate) export_attempt_id: String,
+    pub(crate) seal_version: u64,
+    pub(crate) event_count: u64,
+    pub(crate) high_water_sequence: u64,
+    pub(crate) head_checkpoint_digest: [u8; 32],
+    pub(crate) events_digest: [u8; 32],
+    pub(crate) policy_closure_digest: Option<[u8; 32]>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OpenClockCatalog {
     pub(crate) sealed_at: TrellisTimestamp,
