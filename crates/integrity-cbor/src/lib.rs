@@ -152,7 +152,9 @@ pub fn decode_cbor_value(bytes: &[u8]) -> Result<Value, CborHelperError> {
 /// Recursively sorts CBOR map entries by encoded key bytes.
 ///
 /// # Errors
-/// Returns an error when any map key cannot be encoded as CBOR.
+/// Returns an error when any map key cannot be encoded as CBOR, when a map
+/// contains duplicate canonical key encodings, or when a float is not finite
+/// or uses negative zero.
 pub fn canonicalize_cbor_value(value: &Value) -> Result<Value, CborHelperError> {
     match value {
         Value::Array(items) => Ok(Value::Array(
@@ -172,6 +174,16 @@ pub fn canonicalize_cbor_value(value: &Value) -> Result<Value, CborHelperError> 
                 })
                 .collect::<Result<Vec<_>, CborHelperError>>()?;
             entries.sort_by(|left, right| left.0.cmp(&right.0));
+            if let Some((duplicate_key, _, _)) = entries
+                .windows(2)
+                .find(|pair| pair[0].0 == pair[1].0)
+                .map(|pair| &pair[1])
+            {
+                return Err(CborHelperError(format!(
+                    "duplicate canonical CBOR map key `{}`",
+                    hex_lower(duplicate_key)
+                )));
+            }
             Ok(Value::Map(
                 entries
                     .into_iter()
@@ -179,6 +191,12 @@ pub fn canonicalize_cbor_value(value: &Value) -> Result<Value, CborHelperError> 
                     .collect(),
             ))
         }
+        Value::Float(float) if !float.is_finite() => Err(CborHelperError(
+            "CBOR float must be finite for canonical encoding".to_owned(),
+        )),
+        Value::Float(float) if *float == 0.0 && float.to_bits() != 0.0_f64.to_bits() => Err(
+            CborHelperError("CBOR float must use canonical +0, not -0".to_owned()),
+        ),
         Value::Tag(tag, item) => Ok(Value::Tag(*tag, Box::new(canonicalize_cbor_value(item)?))),
         other => Ok(other.clone()),
     }
@@ -402,6 +420,16 @@ fn json_to_cbor_value_at_path(
 
 fn encoded_cbor_key_bytes(value: &Value) -> Result<Vec<u8>, CborHelperError> {
     encode_cbor_value(value)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Performs a case-sensitive map lookup for a text key.
@@ -762,6 +790,45 @@ mod tests {
                 0xa1, 0x67, b'c', b'o', b'n', b's', b'e', b'n', b't', 0xa2, 0x61, b'a', 0x65, b'f',
                 b'i', b'r', b's', b't', 0x61, b'z', 0x64, b'l', b'a', b's', b't',
             ]
+        );
+    }
+
+    #[test]
+    fn canonicalize_cbor_value_rejects_duplicate_nested_map_keys() {
+        let value = Value::Map(vec![(
+            Value::Text("consent".to_owned()),
+            Value::Map(vec![
+                (Value::Text("a".to_owned()), Value::Text("first".to_owned())),
+                (
+                    Value::Text("a".to_owned()),
+                    Value::Text("second".to_owned()),
+                ),
+            ]),
+        )]);
+
+        let error = encode_canonical_cbor_value(&value).expect_err("duplicate key rejects");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate canonical CBOR map key"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_cbor_value_rejects_non_canonical_float_scalars() {
+        assert_eq!(
+            encode_canonical_cbor_value(&Value::Float(f64::NAN))
+                .expect_err("nan rejects")
+                .to_string(),
+            "CBOR float must be finite for canonical encoding"
+        );
+        assert_eq!(
+            encode_canonical_cbor_value(&Value::Float(-0.0))
+                .expect_err("negative zero rejects")
+                .to_string(),
+            "CBOR float must use canonical +0, not -0"
         );
     }
 
