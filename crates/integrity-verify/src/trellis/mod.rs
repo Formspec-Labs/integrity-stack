@@ -94,7 +94,9 @@ pub use export::*;
 pub use kinds::{VerificationFailureKind, VerifyErrorKind};
 pub use types::*;
 pub use validator::{
-    DomainEvent, DomainExport, DomainFinding, RecordValidator, Severity, VerificationWithDomain,
+    DomainEvent, DomainExport, DomainFinding, DomainReport, LayeredVerificationReport,
+    RecordValidator, RelyingPartyResult, RelyingPartyVerdict, Severity, VerdictState,
+    VerificationWithDomain,
 };
 
 const SUITE_ID_PHASE_1_I128: i128 = SUITE_ID_PHASE_1 as i128;
