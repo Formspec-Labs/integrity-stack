@@ -253,6 +253,29 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
     })
 }
 
+/// Decodes a consumer detached-signature COSE_Sign1 envelope and validates
+/// that the signed `method_uri` value starts with `expected_prefix`.
+///
+/// # Errors
+/// Returns an error when the envelope is invalid, omits `method_uri`, or
+/// carries a method URI outside the caller-owned prefix.
+pub fn decode_cose_sign1_with_method_uri(
+    bytes: &[u8],
+    expected_prefix: &str,
+) -> Result<(CoseSign1, String), CoseError> {
+    let cose = decode_cose_sign1(bytes)?;
+    let header = decode_protected_header(cose.protected_header())?;
+    match header.method_uri {
+        Some(method_uri) if method_uri.starts_with(expected_prefix) => Ok((cose, method_uri)),
+        Some(method_uri) => Err(CoseError::new(format!(
+            "method_uri {method_uri:?} does not match expected prefix {expected_prefix:?}"
+        ))),
+        None => Err(CoseError::new(format!(
+            "missing method_uri protected header (label {COSE_LABEL_METHOD_URI})"
+        ))),
+    }
+}
+
 /// Decodes an array of tagged COSE_Sign1 values.
 ///
 /// # Errors

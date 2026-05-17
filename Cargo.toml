@@ -9,6 +9,7 @@ members = [
     "crates/integrity-hpke",
     "crates/integrity-seam",
     "crates/integrity-signature",
+    "crates/integrity-signature-ring",
     "crates/integrity-verify",
     "crates/integrity-verify-parity",
     "crates/integrity-verify-cli",
