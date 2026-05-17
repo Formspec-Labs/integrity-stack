@@ -4,8 +4,8 @@
 //! This crate owns the *universal* verification phase shared by every
 //! integrity profile: COSE_Sign1 structural checks, Ed25519 signature
 //! verification, JCS canonical-bytes verification, chain-hash continuity,
-//! deterministic-bundle structural checks, and the `profile_id` dispatcher
-//! surface that hands off profile-flavored payload decoding to plugins.
+//! deterministic-bundle structural checks, and explicit handoff to a default
+//! profile verifier.
 //!
 //! Profile semantics — WOS event vocabularies, Formspec response shapes,
 //! Trellis posture transitions, FactsTier overlays — live in profile
@@ -42,8 +42,7 @@ pub use canonical::{CanonicalCheck, CanonicalFinding};
 pub use chain::{ChainContinuityCheck, ChainFinding};
 pub use cose::{CoseEnvelopeCheck, CoseEnvelopeFinding};
 pub use profile::{
-    FORMSPEC_PROFILE_ID, ProfileDispatchError, ProfileRegistry, ProfileVerificationResult,
-    ProfileVerifier, WOS_PROFILE_ID,
+    ProfileDispatchError, ProfileRegistry, ProfileVerificationResult, ProfileVerifier,
 };
 pub use report::{
     BundleEntryView, CanonicalDigestCheck, ChainEventView, SubstrateTier, UniversalFailure,
@@ -57,12 +56,9 @@ use integrity_cose::{sig_structure_bytes, verify_ed25519_signature};
 /// Iterates the supplied [`VerifyBundleInput`], runs every universal check
 /// (envelope shape, signature, chain continuity, JCS digest where
 /// declared, bundle structural ordering), then dispatches each event to
-/// the registered [`ProfileVerifier`] keyed by the envelope's
-/// `profile_id`. Events whose `profile_id` is `None` route to the
-/// registry's explicit default verifier (suite_id-only events from the
-/// Phase-1 envelope era). Missing defaults and unknown `profile_id`
-/// values produce named universal failures rather than hard aborting so
-/// the report can record every envelope's outcome.
+/// the registry's explicit default [`ProfileVerifier`]. Missing defaults
+/// produce named universal failures rather than hard aborting so the report
+/// can record every envelope's outcome.
 pub fn verify_universal(
     input: &VerifyBundleInput<'_>,
     registry: &ProfileRegistry,
@@ -117,29 +113,18 @@ pub fn verify_universal(
             }
         }
 
-        let profile_id = decoded.profile_id();
-        match registry.lookup_required(profile_id) {
+        match registry.lookup_required() {
             Ok(verifier) => {
                 let payload = decoded.resolve_payload(event.detached_payload).ok();
-                let outcome = verifier.verify_profile_record(
-                    profile_id.unwrap_or(0),
-                    payload.unwrap_or_default(),
-                    decoded.protected_header(),
-                );
+                let outcome = verifier
+                    .verify_profile_record(payload.unwrap_or_default(), decoded.protected_header());
                 report.profile_results.push(outcome);
             }
-            Err(ProfileDispatchError::UnknownProfileId(id)) => {
+            Err(ProfileDispatchError::MissingDefaultVerifier) => {
                 report.universal_failures.push(UniversalFailure::new(
-                    UniversalFailureKind::UnknownProfileId,
+                    UniversalFailureKind::MissingProfileVerifier,
                     index,
-                    format!("no ProfileVerifier registered for profile_id={id}"),
-                ));
-            }
-            Err(ProfileDispatchError::MissingProfileIdNoDefault) => {
-                report.universal_failures.push(UniversalFailure::new(
-                    UniversalFailureKind::MissingProfileIdNoDefault,
-                    index,
-                    ProfileDispatchError::MissingProfileIdNoDefault.to_string(),
+                    ProfileDispatchError::MissingDefaultVerifier.to_string(),
                 ));
             }
         }
@@ -168,6 +153,7 @@ pub fn verify_universal(
 // Re-exports used downstream so profile-plugin crates don't have to
 // re-discover the COSE primitive crate.
 pub use integrity_cose::{
-    COSE_LABEL_ALG, COSE_LABEL_KID, COSE_LABEL_PROFILE_ID, COSE_LABEL_SUITE_ID, CoseError,
-    CoseSign1, SUITE_ID_PHASE_1, decode_cose_sign1 as decode_cose_envelope,
+    COSE_LABEL_ALG, COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_KID, COSE_LABEL_METHOD_URI,
+    COSE_LABEL_SUITE_ID, CoseError, CoseSign1, SUITE_ID_PHASE_1,
+    decode_cose_sign1 as decode_cose_envelope,
 };

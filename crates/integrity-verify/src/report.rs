@@ -133,11 +133,8 @@ pub enum UniversalFailureKind {
     UnsupportedAlgorithm,
     /// Ed25519 signature failed verification.
     SignatureInvalid,
-    /// `profile_id` was present on the envelope but no
-    /// [`crate::ProfileVerifier`] is registered for it.
-    UnknownProfileId,
-    /// The envelope carried no `profile_id` and no default verifier exists.
-    MissingProfileIdNoDefault,
+    /// No [`crate::ProfileVerifier`] is registered for semantic checks.
+    MissingProfileVerifier,
     /// JCS canonical-bytes digest did not match the declared digest.
     CanonicalDigestMismatch,
     /// Chain-hash continuity violated (prev_hash, ordering).
@@ -155,8 +152,7 @@ impl UniversalFailureKind {
             Self::MissingProtectedHeader => "missing_protected_header",
             Self::UnsupportedAlgorithm => "unsupported_algorithm",
             Self::SignatureInvalid => "signature_invalid",
-            Self::UnknownProfileId => "unknown_profile_id",
-            Self::MissingProfileIdNoDefault => "missing_profile_id_no_default",
+            Self::MissingProfileVerifier => "missing_profile_verifier",
             Self::CanonicalDigestMismatch => "canonical_digest_mismatch",
             Self::ChainContinuityViolation => "chain_continuity_violation",
             Self::BundleStructuralViolation => "bundle_structural_violation",

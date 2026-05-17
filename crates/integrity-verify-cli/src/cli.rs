@@ -45,7 +45,6 @@ impl OutputFormat {
 pub struct VerifyArgs {
     pub bundle_path: PathBuf,
     pub format: OutputFormat,
-    pub profile_override: Option<u64>,
 }
 
 const CLI_SUBSTRATE_TIER_CEILING: SubstrateTier = SubstrateTier::L0;
@@ -54,14 +53,14 @@ const USAGE: &str = "\
 usage: integrity-verify <command>
 
 commands:
-  verify <bundle.zip> [--format text|json|both] [--profile <id>]
+  verify <bundle.zip> [--format text|json|both]
   verify-export <bundle.zip> [--format text|json|both]
 
 `verify` enumerates ZIP entries, parses each `.cbor` entry as a COSE_Sign1
 envelope, runs the universal verifier (envelope shape, signature when public
 keys are available, bundle structural ordering), and prints a
 VerificationReport including substrate_tier. It does not register permissive
-profile shims; use `verify-export` for WOS/Trellis export semantics.
+semantic profile shims; use `verify-export` for WOS/Trellis export semantics.
 
 `verify-export` verifies a Trellis/WOS export ZIP through
 trellis_verify_wos::verify_export_zip.
@@ -70,20 +69,19 @@ Exit code 0 on a verified report; exit code 1 on any failure.";
 
 /// CLI top-level dispatcher.
 ///
-/// `registry_factory` is a closure so tests can substitute a registry that
-/// registers `AlwaysOk(profile_id)` verifiers without depending on a future
-/// WOS profile plugin.
+/// `registry_factory` is a closure so tests can substitute a registry without
+/// depending on a WOS profile plugin.
 pub fn run(
     args: &[String],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
-    registry_factory: &dyn Fn(Option<u64>) -> ProfileRegistry,
+    registry_factory: &dyn Fn() -> ProfileRegistry,
 ) -> Result<(), String> {
     let command = args.get(1).map(String::as_str).unwrap_or("");
     match command {
         "verify" => {
             let parsed = parse_verify_args(&args[2..])?;
-            let registry = registry_factory(parsed.profile_override);
+            let registry = registry_factory();
             verify_command(&parsed, &registry, stdout)
         }
         "verify-export" => {
@@ -110,7 +108,6 @@ struct VerifyExportArgs {
 fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
     let mut bundle_path: Option<PathBuf> = None;
     let mut format = OutputFormat::Both;
-    let mut profile_override: Option<u64> = None;
 
     let mut index = 0;
     while index < rest.len() {
@@ -121,17 +118,6 @@ fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
                     .get(index + 1)
                     .ok_or_else(|| "--format requires a value".to_string())?;
                 format = OutputFormat::parse(value)?;
-                index += 2;
-            }
-            "--profile" => {
-                let value = rest
-                    .get(index + 1)
-                    .ok_or_else(|| "--profile requires a value".to_string())?;
-                profile_override = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| format!("--profile value `{value}` is not a u64"))?,
-                );
                 index += 2;
             }
             "--help" | "-h" => {
@@ -153,7 +139,6 @@ fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
     Ok(VerifyArgs {
         bundle_path,
         format,
-        profile_override,
     })
 }
 
@@ -480,8 +465,8 @@ fn render_json(report: &VerificationReport) -> Result<String, String> {
         .map(|r| {
             let mut row = serde_json::Map::new();
             row.insert(
-                "profile_id".into(),
-                serde_json::Value::Number(serde_json::Number::from(r.profile_id)),
+                "verifier_id".into(),
+                serde_json::Value::String(r.verifier_id.clone()),
             );
             row.insert(
                 "verdict".into(),
@@ -633,16 +618,9 @@ mod tests {
 
     #[test]
     fn verify_args_accept_flags() {
-        let args = parse_verify_args(&[
-            "/tmp/bundle.zip".into(),
-            "--format".into(),
-            "json".into(),
-            "--profile".into(),
-            "1".into(),
-        ])
-        .unwrap();
+        let args = parse_verify_args(&["/tmp/bundle.zip".into(), "--format".into(), "json".into()])
+            .unwrap();
         assert_eq!(args.format, OutputFormat::Json);
-        assert_eq!(args.profile_override, Some(1));
         assert_eq!(args.bundle_path.to_str().unwrap(), "/tmp/bundle.zip");
     }
 
@@ -664,7 +642,7 @@ mod tests {
     fn run_help_command_succeeds() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let registry = |_| ProfileRegistry::new();
+        let registry = || ProfileRegistry::new();
         run(
             &["integrity-verify".into(), "--help".into()],
             &mut stdout,
@@ -679,7 +657,7 @@ mod tests {
     fn run_rejects_unknown_command() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let registry = |_| ProfileRegistry::new();
+        let registry = || ProfileRegistry::new();
         let err = run(
             &["integrity-verify".into(), "explode".into()],
             &mut stdout,

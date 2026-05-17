@@ -2,58 +2,52 @@
 //! End-to-end tests for the universal verifier.
 
 use ed25519_dalek::{Signer, SigningKey};
-use integrity_cose::{
-    protected_header_bytes, protected_header_bytes_with_profile_id, sig_structure_bytes,
-    sign1_bytes,
-};
+use integrity_cose::{protected_header_bytes, sig_structure_bytes, sign1_bytes};
 
 use crate::{
-    BundleEntryView, CanonicalDigestCheck, ChainEventView, ProfileDispatchError, ProfileRegistry,
+    BundleEntryView, CanonicalDigestCheck, ChainEventView, ProfileRegistry,
     ProfileVerificationResult, ProfileVerifier, SubstrateTier, UniversalFailureKind,
-    VerifyBundleInput, VerifyEvent, WOS_PROFILE_ID, verify_universal,
+    VerifyBundleInput, VerifyEvent, verify_universal,
 };
 
-struct AlwaysOk(u64);
+struct AlwaysOk(&'static str);
 impl ProfileVerifier for AlwaysOk {
-    fn profile_id(&self) -> u64 {
+    fn verifier_id(&self) -> &str {
         self.0
     }
-    fn verify_profile_record(
-        &self,
-        envelope_profile_id: u64,
-        _: &[u8],
-        _: &[u8],
-    ) -> ProfileVerificationResult {
-        ProfileVerificationResult::verified(envelope_profile_id, "always-ok")
+    fn verify_profile_record(&self, _: &[u8], _: &[u8]) -> ProfileVerificationResult {
+        ProfileVerificationResult::verified(self.verifier_id(), "always-ok")
     }
 }
 
-struct AlwaysFail(u64);
+struct AlwaysFail(&'static str);
 impl ProfileVerifier for AlwaysFail {
-    fn profile_id(&self) -> u64 {
+    fn verifier_id(&self) -> &str {
         self.0
     }
-    fn verify_profile_record(
-        &self,
-        envelope_profile_id: u64,
-        _: &[u8],
-        _: &[u8],
-    ) -> ProfileVerificationResult {
-        ProfileVerificationResult::failed(envelope_profile_id, "always-fail", vec!["nope".into()])
+    fn verify_profile_record(&self, _: &[u8], _: &[u8]) -> ProfileVerificationResult {
+        ProfileVerificationResult::failed(self.verifier_id(), "always-fail", vec!["nope".into()])
     }
 }
 
-fn build_signed_event(
-    seed: [u8; 32],
-    profile_id: Option<u64>,
-    payload: &[u8],
-) -> (Vec<u8>, [u8; 32]) {
+fn build_signed_event(seed: [u8; 32], payload: &[u8]) -> (Vec<u8>, [u8; 32]) {
     let signing_key = SigningKey::from_bytes(&seed);
     let public_key = signing_key.verifying_key().to_bytes();
-    let protected = match profile_id {
-        Some(id) => protected_header_bytes_with_profile_id([0xab; 16], id),
-        None => protected_header_bytes([0xab; 16]),
-    };
+    let protected = protected_header_bytes([0xab; 16]);
+    let sig_struct = sig_structure_bytes(&protected, payload);
+    let signature: ed25519_dalek::Signature = signing_key.sign(&sig_struct);
+    let bytes = sign1_bytes(&protected, payload, signature.to_bytes());
+    (bytes, public_key)
+}
+
+fn build_retired_profile_event(seed: [u8; 32], payload: &[u8]) -> (Vec<u8>, [u8; 32]) {
+    let signing_key = SigningKey::from_bytes(&seed);
+    let public_key = signing_key.verifying_key().to_bytes();
+    let protected = vec![
+        0xa4, 0x01, 0x27, 0x04, 0x50, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+        0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0x3a, 0x00, 0x01, 0x00, 0x00, 0x01, 0x3a, 0x00, 0x01,
+        0x00, 0x02, 0x18, 0x63,
+    ];
     let sig_struct = sig_structure_bytes(&protected, payload);
     let signature: ed25519_dalek::Signature = signing_key.sign(&sig_struct);
     let bytes = sign1_bytes(&protected, payload, signature.to_bytes());
@@ -62,14 +56,14 @@ fn build_signed_event(
 
 #[test]
 fn verify_universal_accepts_well_formed_event_with_default_profile() {
-    let (event_bytes, public_key) = build_signed_event([0x01; 32], None, b"payload");
+    let (event_bytes, public_key) = build_signed_event([0x01; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
         detached_payload: None,
     }];
     let mut registry = ProfileRegistry::new();
-    registry.register_default(Box::new(AlwaysOk(0)));
+    registry.register_default(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -87,8 +81,8 @@ fn verify_universal_accepts_well_formed_event_with_default_profile() {
 }
 
 #[test]
-fn verify_universal_rejects_unknown_profile_id() {
-    let (event_bytes, public_key) = build_signed_event([0x02; 32], Some(99), b"payload");
+fn verify_universal_rejects_retired_profile_header_as_malformed() {
+    let (event_bytes, public_key) = build_retired_profile_event([0x02; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -110,21 +104,22 @@ fn verify_universal_rejects_unknown_profile_id() {
         report
             .universal_failures
             .iter()
-            .any(|f| f.kind == UniversalFailureKind::UnknownProfileId),
-        "expected UnknownProfileId failure, got {report:?}"
+            .any(|f| f.kind == UniversalFailureKind::MalformedEnvelope
+                && f.message.contains("RetiredProfileIdPresent")),
+        "expected retired profile header to be malformed, got {report:?}"
     );
 }
 
 #[test]
-fn verify_universal_routes_to_registered_profile() {
-    let (event_bytes, public_key) = build_signed_event([0x03; 32], Some(7), b"payload");
+fn verify_universal_routes_to_default_profile_verifier() {
+    let (event_bytes, public_key) = build_signed_event([0x03; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
         detached_payload: None,
     }];
     let mut registry = ProfileRegistry::new();
-    registry.register(Box::new(AlwaysFail(7)));
+    registry.register(Box::new(AlwaysFail("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -139,12 +134,12 @@ fn verify_universal_routes_to_registered_profile() {
     assert!(!report.profile_verified);
     assert_eq!(report.profile_results.len(), 1);
     assert_eq!(report.profile_results[0].verdict, "always-fail");
-    assert_eq!(report.profile_results[0].profile_id, 7);
+    assert_eq!(report.profile_results[0].verifier_id, "default");
 }
 
 #[test]
 fn verify_universal_detects_bad_signature() {
-    let (event_bytes, _) = build_signed_event([0x04; 32], None, b"payload");
+    let (event_bytes, _) = build_signed_event([0x04; 32], b"payload");
     let wrong_key = [0u8; 32];
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
@@ -152,7 +147,7 @@ fn verify_universal_detects_bad_signature() {
         detached_payload: None,
     }];
     let mut registry = ProfileRegistry::new();
-    registry.register_default(Box::new(AlwaysOk(0)));
+    registry.register_default(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -240,14 +235,14 @@ fn verify_universal_runs_canonical_digest_check() {
 
 #[test]
 fn substrate_tier_l0_when_only_envelope_verified() {
-    let (event_bytes, public_key) = build_signed_event([0xa0; 32], None, b"payload");
+    let (event_bytes, public_key) = build_signed_event([0xa0; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
         detached_payload: None,
     }];
     let mut registry = ProfileRegistry::new();
-    registry.register_default(Box::new(AlwaysOk(0)));
+    registry.register_default(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -265,7 +260,7 @@ fn substrate_tier_l0_when_only_envelope_verified() {
 
 #[test]
 fn substrate_tier_l1_when_chain_continuity_verified() {
-    let (event_bytes, public_key) = build_signed_event([0xa1; 32], None, b"payload");
+    let (event_bytes, public_key) = build_signed_event([0xa1; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -284,7 +279,7 @@ fn substrate_tier_l1_when_chain_continuity_verified() {
         },
     ];
     let mut registry = ProfileRegistry::new();
-    registry.register_default(Box::new(AlwaysOk(0)));
+    registry.register_default(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -302,7 +297,7 @@ fn substrate_tier_l1_when_chain_continuity_verified() {
 
 #[test]
 fn substrate_tier_l2_when_chain_and_bundle_verified() {
-    let (event_bytes, public_key) = build_signed_event([0xa2; 32], None, b"payload");
+    let (event_bytes, public_key) = build_signed_event([0xa2; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -325,7 +320,7 @@ fn substrate_tier_l2_when_chain_and_bundle_verified() {
         BundleEntryView { path: "a/y" },
     ];
     let mut registry = ProfileRegistry::new();
-    registry.register_default(Box::new(AlwaysOk(0)));
+    registry.register_default(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -343,7 +338,7 @@ fn substrate_tier_l2_when_chain_and_bundle_verified() {
 
 #[test]
 fn substrate_tier_drops_when_chain_continuity_violated() {
-    let (event_bytes, public_key) = build_signed_event([0xa3; 32], None, b"payload");
+    let (event_bytes, public_key) = build_signed_event([0xa3; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -367,7 +362,7 @@ fn substrate_tier_drops_when_chain_continuity_violated() {
         BundleEntryView { path: "a/y" },
     ];
     let mut registry = ProfileRegistry::new();
-    registry.register_default(Box::new(AlwaysOk(0)));
+    registry.register_default(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -414,19 +409,18 @@ fn substrate_tier_string_tokens_are_stable() {
     assert_eq!(SubstrateTier::L3.as_str(), "L3");
 }
 
-// ---- 3C.3 explicit profile dispatch tests ---------------------------------
+// ---- default semantic verifier dispatch tests ------------------------------
 
 #[test]
-fn wos_profile_id_routes_to_registered_verifier() {
-    let (event_bytes, public_key) =
-        build_signed_event([0xb0; 32], Some(WOS_PROFILE_ID), b"payload");
+fn default_verifier_handles_post_adr_0109_envelopes() {
+    let (event_bytes, public_key) = build_signed_event([0xb0; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
         detached_payload: None,
     }];
     let mut registry = ProfileRegistry::new();
-    registry.register(Box::new(AlwaysOk(WOS_PROFILE_ID)));
+    registry.register(Box::new(AlwaysOk("wos-default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -440,38 +434,26 @@ fn wos_profile_id_routes_to_registered_verifier() {
 
     assert!(report.profile_verified, "{report:?}");
     assert_eq!(report.profile_results.len(), 1);
-    assert_eq!(report.profile_results[0].profile_id, WOS_PROFILE_ID);
+    assert_eq!(report.profile_results[0].verifier_id, "wos-default");
     assert!(
         report
             .universal_failures
             .iter()
-            .all(|f| f.kind != UniversalFailureKind::UnknownProfileId),
-        "expected no UnknownProfileId failures, got {report:?}"
+            .all(|f| f.kind != UniversalFailureKind::MissingProfileVerifier),
+        "expected no missing-verifier failures, got {report:?}"
     );
 }
 
 #[test]
-fn unknown_profile_id_rejects_with_named_error() {
-    let registry = ProfileRegistry::new();
-    let err = registry
-        .lookup_required(Some(9999))
-        .err()
-        .expect("expected UnknownProfileId error");
-    assert_eq!(err, ProfileDispatchError::UnknownProfileId(9999));
-    assert!(err.to_string().contains("9999"));
-}
-
-#[test]
-fn unknown_profile_id_surfaces_in_report() {
-    let (event_bytes, public_key) = build_signed_event([0xb1; 32], Some(9999), b"payload");
+fn retired_profile_header_surfaces_as_malformed_envelope() {
+    let (event_bytes, public_key) = build_retired_profile_event([0xb1; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
         detached_payload: None,
     }];
     let mut registry = ProfileRegistry::new();
-    // Register a different profile so the registry is non-empty.
-    registry.register(Box::new(AlwaysOk(WOS_PROFILE_ID)));
+    registry.register(Box::new(AlwaysOk("default")));
 
     let report = verify_universal(
         &VerifyBundleInput {
@@ -483,21 +465,21 @@ fn unknown_profile_id_surfaces_in_report() {
         &registry,
     );
 
-    let unknown = report
+    let malformed = report
         .universal_failures
         .iter()
-        .find(|f| f.kind == UniversalFailureKind::UnknownProfileId)
-        .expect("expected UnknownProfileId failure in report");
+        .find(|f| f.kind == UniversalFailureKind::MalformedEnvelope)
+        .expect("expected MalformedEnvelope failure in report");
     assert!(
-        unknown.message.contains("9999"),
-        "expected diagnostic to name the rejected profile_id, got: {}",
-        unknown.message
+        malformed.message.contains("RetiredProfileIdPresent"),
+        "expected diagnostic to name retired label, got: {}",
+        malformed.message
     );
 }
 
 #[test]
-fn missing_profile_id_without_default_surfaces_in_report() {
-    let (event_bytes, public_key) = build_signed_event([0xb2; 32], None, b"payload");
+fn missing_default_verifier_surfaces_in_report() {
+    let (event_bytes, public_key) = build_signed_event([0xb2; 32], b"payload");
     let events = [VerifyEvent {
         sign1_bytes: &event_bytes,
         public_key: Some(public_key),
@@ -518,11 +500,11 @@ fn missing_profile_id_without_default_surfaces_in_report() {
     let missing = report
         .universal_failures
         .iter()
-        .find(|f| f.kind == UniversalFailureKind::MissingProfileIdNoDefault)
-        .expect("expected MissingProfileIdNoDefault failure in report");
+        .find(|f| f.kind == UniversalFailureKind::MissingProfileVerifier)
+        .expect("expected MissingProfileVerifier failure in report");
     assert!(
-        missing.message.contains("no profile_id"),
-        "expected diagnostic to name missing profile_id, got: {}",
+        missing.message.contains("no default ProfileVerifier"),
+        "expected diagnostic to name missing verifier, got: {}",
         missing.message
     );
     assert!(!report.universal_verified, "{report:?}");
@@ -531,30 +513,22 @@ fn missing_profile_id_without_default_surfaces_in_report() {
 }
 
 #[test]
-fn wos_profile_id_round_trip_dispatch_and_named_rejection() {
-    // Round trip: same registry serves a known profile id and rejects an
-    // unknown one with a named error.
+fn default_verifier_lookup_returns_registered_verifier() {
     let mut registry = ProfileRegistry::new();
-    registry.register(Box::new(AlwaysOk(WOS_PROFILE_ID)));
+    registry.register(Box::new(AlwaysOk("default")));
 
     let known = registry
-        .lookup_required(Some(WOS_PROFILE_ID))
-        .expect("WOS_PROFILE_ID should route to registered verifier");
-    assert_eq!(known.profile_id(), WOS_PROFILE_ID);
-
-    let unknown = registry.lookup_required(Some(9999));
-    assert_eq!(
-        unknown.err(),
-        Some(ProfileDispatchError::UnknownProfileId(9999))
-    );
+        .lookup_required()
+        .expect("default verifier should route");
+    assert_eq!(known.verifier_id(), "default");
 }
 
 #[test]
-fn missing_profile_id_with_no_default_returns_named_error() {
+fn missing_default_verifier_returns_named_error() {
     let registry = ProfileRegistry::new();
     let err = registry
-        .lookup_required(None)
+        .lookup_required()
         .err()
-        .expect("expected MissingProfileIdNoDefault error");
-    assert_eq!(err, ProfileDispatchError::MissingProfileIdNoDefault);
+        .expect("expected MissingDefaultVerifier error");
+    assert_eq!(err, crate::ProfileDispatchError::MissingDefaultVerifier);
 }

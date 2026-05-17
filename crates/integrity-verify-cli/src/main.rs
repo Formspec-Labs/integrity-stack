@@ -38,7 +38,6 @@ fn main() -> ExitCode {
     }
 }
 
-fn default_registry(profile_id: Option<u64>) -> ProfileRegistry {
-    let _ = profile_id;
+fn default_registry() -> ProfileRegistry {
     ProfileRegistry::new()
 }

@@ -3,10 +3,10 @@
 // plugin (`trellis-verify-wos`). Today's `trellis-verify` still hosts
 // the legacy genesis-append + export-bundle paths; the universal
 // pieces (envelope shape, JCS canonical digest, bundle structural
-// ordering, chain continuity, `profile_id` dispatch) live in
+// ordering, chain continuity, and profile-verifier handoff live in
 // `integrity-verify::{cose, canonical, bundle, chain, profile,
 // verify_universal}`. Subsequent tasks (3C.2 `substrate_tier`, 3C.3
-// `profile_id` dispatcher) finish the move; the functions in this
+// profile handoff) finish the move; the functions in this
 // file marked `// NEXT TO MOVE TO integrity-verify` below are the
 // migration map.
 //
@@ -34,8 +34,8 @@ use trellis_types::{CONTENT_DOMAIN, CborHelperError, SUITE_ID_PHASE_1, domain_se
 
 /// Re-exports the universal verifier surface so downstream callers can
 /// reach `integrity-verify` without an extra direct dependency. The
-/// WOS / Trellis-specific profile plugin (`trellis-verify-wos`) will
-/// implement `ProfileVerifier` against this trait in 3C.3.
+/// WOS / Trellis-specific profile plugin (`trellis-verify-wos`) can
+/// implement `ProfileVerifier` against this trait.
 pub use crate::{
     BundleEntryView as UniversalBundleEntryView, BundleStructuralCheck as UniversalBundleCheck,
     CanonicalCheck as UniversalCanonicalCheck,
