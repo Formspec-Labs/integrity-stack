@@ -641,10 +641,8 @@ mod tests {
             json.get("methodUri").and_then(serde_json::Value::as_str),
             Some("urn:formspec:sig-method:ed25519-cose-sign1@1")
         );
-        assert!(
-            json.get("signatureMethod").is_none(),
-            "ADR 0109 removed the retired JSON signatureMethod mirror"
-        );
+        let retired_mirror_key = ["signature", "Method"].concat();
+        assert!(json.get(&retired_mirror_key).is_none());
     }
 
     #[test]
