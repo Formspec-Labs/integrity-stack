@@ -29,15 +29,10 @@ pub const COSE_LABEL_ALG: i128 = 1;
 pub const COSE_LABEL_KID: i128 = 4;
 /// COSE protected-header label for an integrity profile suite.
 pub const COSE_LABEL_SUITE_ID: i128 = -65_537;
-/// COSE protected-header label for plugin profile dispatch.
+/// COSE protected-header label for retired profile dispatch.
 ///
-/// **Retired by ADR 0109.** New envelopes MUST NOT carry this label.
-/// Decode helpers continue to read it during the migration window for
-/// backward compatibility with legacy envelopes; the allowance closes
-/// once all callers move to the post-ADR-0109 dispatch shape (see
-/// [`substrate_protected_header`] for substrate envelopes and
-/// [`detached_signature_protected_header`] for consumer detached-signature
-/// envelopes).
+/// **Retired by ADR 0109.** New envelopes MUST NOT carry this label. Decode
+/// helpers reject envelopes presenting it with a named error.
 pub const COSE_LABEL_PROFILE_ID: i128 = -65_539;
 /// COSE protected-header label for Trellis substrate `artifact_type` (ADR 0109).
 ///
@@ -58,6 +53,12 @@ pub const COSE_LABEL_METHOD_URI: i128 = -65_540;
 pub const COSE_SIGN1_TAG: u64 = 18;
 /// Phase-1 signature suite identifier used by current Trellis vectors.
 pub const SUITE_ID_PHASE_1: u64 = 1;
+/// Maximum accepted UTF-8 byte length for `method_uri`.
+///
+/// ADR 0109 makes `method_uri` a signed dispatch selector. Keeping the value
+/// bounded prevents unbounded allocation or logging surfaces in callers while
+/// leaving ample room for owner-scoped URI values.
+pub const MAX_METHOD_URI_LEN: usize = 512;
 
 /// Unsigned magnitude for [`COSE_LABEL_SUITE_ID`].
 pub const COSE_SUITE_ID_LABEL_MAGNITUDE: u64 = 65_536;
@@ -221,6 +222,8 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
         .as_map()
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
     reject_duplicate_integer_labels(protected_map)?;
+    reject_retired_profile_id(protected_map)?;
+    reject_over_cap_method_uri(protected_map)?;
 
     match &items[1] {
         Value::Map(entries) if entries.is_empty() => {}
@@ -243,7 +246,7 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
         alg: integer_label_i128(protected_map, COSE_LABEL_ALG)?,
         kid: integer_label_bytes(protected_map, COSE_LABEL_KID)?,
         suite_id: integer_label_u64(protected_map, COSE_LABEL_SUITE_ID)?,
-        profile_id: integer_label_u64(protected_map, COSE_LABEL_PROFILE_ID)?,
+        profile_id: None,
         payload,
         signature,
     })
@@ -311,6 +314,7 @@ pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseErro
         .as_map()
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
     reject_duplicate_integer_labels(map)?;
+    reject_retired_profile_id(map)?;
 
     let alg = integer_label_i128(map, COSE_LABEL_ALG)?
         .ok_or_else(|| CoseError::new("protected header missing required alg label"))?;
@@ -318,6 +322,9 @@ pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseErro
     let suite_id = integer_label_u64(map, COSE_LABEL_SUITE_ID)?;
     let artifact_type = integer_label_tstr(map, COSE_LABEL_ARTIFACT_TYPE)?;
     let method_uri = integer_label_tstr(map, COSE_LABEL_METHOD_URI)?;
+    if let Some(method_uri) = method_uri.as_deref() {
+        validate_method_uri_len(method_uri)?;
+    }
 
     Ok(ProtectedHeader {
         alg,
@@ -339,6 +346,31 @@ fn reject_duplicate_integer_labels(map: &[(Value, Value)]) -> Result<(), CoseErr
                 "duplicate protected-header label {integer}"
             )));
         }
+    }
+    Ok(())
+}
+
+fn reject_retired_profile_id(map: &[(Value, Value)]) -> Result<(), CoseError> {
+    if integer_label_value(map, COSE_LABEL_PROFILE_ID).is_some() {
+        return Err(CoseError::new(
+            "RetiredProfileIdPresent: retired profile_id protected-header label -65539 is present",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_over_cap_method_uri(map: &[(Value, Value)]) -> Result<(), CoseError> {
+    if let Some(method_uri) = integer_label_tstr(map, COSE_LABEL_METHOD_URI)? {
+        validate_method_uri_len(&method_uri)?;
+    }
+    Ok(())
+}
+
+fn validate_method_uri_len(method_uri: &str) -> Result<(), CoseError> {
+    if method_uri.len() > MAX_METHOD_URI_LEN {
+        return Err(CoseError::new(format!(
+            "MethodUriTooLong: method_uri exceeds {MAX_METHOD_URI_LEN} bytes"
+        )));
     }
     Ok(())
 }
@@ -543,11 +575,7 @@ pub fn substrate_protected_header(
 /// dispatch the right validator. This crate enforces the byte layout, not
 /// the URI scheme or value semantics.
 #[must_use]
-pub fn detached_signature_protected_header(
-    alg: i32,
-    kid: &[u8],
-    method_uri: &str,
-) -> Vec<u8> {
+pub fn detached_signature_protected_header(alg: i32, kid: &[u8], method_uri: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(48);
     bytes.push(CBOR_MAP_3);
     bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
@@ -663,11 +691,12 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        decode_cose_sign1, decode_protected_header, detached_signature_protected_header,
+        COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_METHOD_URI, MAX_METHOD_URI_LEN, decode_cose_sign1,
+        decode_protected_header, detached_signature_protected_header,
         encode_cose_artifact_type_label, encode_cose_method_uri_label, protected_header_bytes,
-        protected_header_bytes_for_alg, protected_header_bytes_with_profile_id, sig_structure_bytes,
-        sign_ed25519, sign1_bytes, sign1_detached_bytes, substrate_protected_header,
-        verify_ed25519_sign1, COSE_LABEL_ARTIFACT_TYPE, COSE_LABEL_METHOD_URI,
+        protected_header_bytes_for_alg, protected_header_bytes_with_profile_id,
+        sig_structure_bytes, sign_ed25519, sign1_bytes, sign1_detached_bytes,
+        substrate_protected_header, verify_ed25519_sign1,
     };
 
     #[test]
@@ -778,7 +807,7 @@ mod tests {
     fn detached_sign1_verifies_against_supplied_payload() {
         let seed = [0x42; 32];
         let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-        let protected = protected_header_bytes_with_profile_id([0x22; 16], 1);
+        let protected = protected_header_bytes([0x22; 16]);
         let payload = b"detached-payload";
         let signature = sign_ed25519(seed, &sig_structure_bytes(&protected, payload));
         let sign1 = sign1_detached_bytes(&protected, signature);
@@ -786,7 +815,7 @@ mod tests {
 
         assert_eq!(decoded.payload(), None);
         assert_eq!(decoded.suite_id(), Some(1));
-        assert_eq!(decoded.profile_id(), Some(1));
+        assert_eq!(decoded.profile_id(), None);
         assert_eq!(
             decoded
                 .resolve_payload(Some(payload))
@@ -795,6 +824,31 @@ mod tests {
         );
         assert!(
             verify_ed25519_sign1(public_key, &sign1, Some(payload)).expect("verify detached sign1")
+        );
+    }
+
+    #[test]
+    fn decode_cose_sign1_rejects_retired_profile_id_label() {
+        let protected = protected_header_bytes_with_profile_id([0x11; 16], 1);
+        let sign1 = sign1_detached_bytes(&protected, [0x22; 64]);
+
+        let error = decode_cose_sign1(&sign1).expect_err("profile_id must reject");
+
+        assert!(
+            error.to_string().contains("RetiredProfileIdPresent"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_protected_header_rejects_retired_profile_id_label() {
+        let protected = protected_header_bytes_with_profile_id([0x11; 16], 1);
+
+        let error = decode_protected_header(&protected).expect_err("profile_id must reject");
+
+        assert!(
+            error.to_string().contains("RetiredProfileIdPresent"),
+            "unexpected error: {error}"
         );
     }
 
@@ -961,6 +1015,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_protected_header_rejects_over_cap_method_uri() {
+        let method_uri = "a".repeat(MAX_METHOD_URI_LEN + 1);
+        let bytes = detached_signature_protected_header(-8, &[0x44; 16], &method_uri);
+
+        let error = decode_protected_header(&bytes).expect_err("over-cap URI must reject");
+
+        assert!(
+            error.to_string().contains("MethodUriTooLong"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_cose_sign1_rejects_over_cap_method_uri() {
+        let method_uri = "a".repeat(MAX_METHOD_URI_LEN + 1);
+        let protected = detached_signature_protected_header(-8, &[0x44; 16], &method_uri);
+        let sign1 = sign1_detached_bytes(&protected, [0x22; 64]);
+
+        let error = decode_cose_sign1(&sign1).expect_err("over-cap URI must reject");
+
+        assert!(
+            error.to_string().contains("MethodUriTooLong"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn decode_protected_header_rejects_missing_alg() {
         // CBOR MAP_1 with only kid (label 4) — no alg.
         let bytes = [0xa1, 0x04, 0x42, 0x00, 0x01];
@@ -974,11 +1055,9 @@ mod tests {
     #[test]
     fn decode_protected_header_rejects_artifact_type_with_wrong_value_type() {
         // MAP_2: alg=-8, artifact_type=42 (uint instead of tstr).
-        let bytes = [
-            0xa2, 0x01, 0x27, 0x3a, 0x00, 0x01, 0x00, 0x01, 0x18, 0x2a,
-        ];
-        let error = decode_protected_header(&bytes)
-            .expect_err("non-tstr artifact_type must reject");
+        let bytes = [0xa2, 0x01, 0x27, 0x3a, 0x00, 0x01, 0x00, 0x01, 0x18, 0x2a];
+        let error =
+            decode_protected_header(&bytes).expect_err("non-tstr artifact_type must reject");
         assert!(
             error.to_string().contains("is not a text string"),
             "unexpected error: {error}"

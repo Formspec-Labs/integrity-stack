@@ -4,6 +4,7 @@ import {
   COSE_LABEL_METHOD_URI,
   COSE_LABEL_PROFILE_ID,
   FORMSPEC_PROFILE_ID,
+  MAX_METHOD_URI_LEN,
   WOS_PROFILE_ID,
   decodeCoseSign1,
   decodeCoseSign1WithMethodUri,
@@ -21,8 +22,8 @@ import {
 } from './index';
 
 describe('COSE_Sign1 helpers', () => {
-  it('decodes detached COSE_Sign1 with Formspec profile id', () => {
-    const protectedHeader = protectedHeaderBytesForFormspec(-8, new Uint8Array([1, 2, 3]));
+  it('decodes detached COSE_Sign1 with alg and kid', () => {
+    const protectedHeader = protectedHeaderBytesForAlg(-8, new Uint8Array([1, 2, 3]));
     const signature = new Uint8Array(64).fill(7);
     const encoded = encodeCoseSign1(protectedHeader, null, signature);
 
@@ -30,7 +31,7 @@ describe('COSE_Sign1 helpers', () => {
 
     expect(decoded.alg).toBe(-8);
     expect(decoded.kid).toEqual(new Uint8Array([1, 2, 3]));
-    expect(decoded.profileId).toBe(FORMSPEC_PROFILE_ID);
+    expect(decoded.profileId).toBeNull();
     expect(decoded.payload).toBeNull();
     expect(decoded.signature).toEqual(signature);
     expect(resolvePayload(decoded, new Uint8Array([9]))).toEqual(new Uint8Array([9]));
@@ -45,7 +46,7 @@ describe('COSE_Sign1 helpers', () => {
     );
   });
 
-  it('rejects wrong Formspec profile id', () => {
+  it('rejects retired profile id before profile-specific dispatch', () => {
     const protectedHeader = protectedHeaderBytesForAlgWithProfileId(
       -8,
       new Uint8Array([1, 2, 3]),
@@ -54,7 +55,7 @@ describe('COSE_Sign1 helpers', () => {
     const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
 
     expect(() => decodeFormspecCoseSign1(encoded)).toThrow(
-      `wrong Formspec profile_id: expected ${FORMSPEC_PROFILE_ID}, got ${WOS_PROFILE_ID}`,
+      /RetiredProfileIdPresent/,
     );
   });
 
@@ -79,16 +80,23 @@ describe('COSE_Sign1 helpers', () => {
   });
 
   it('rejects embedded payload mismatch', () => {
-    const protectedHeader = protectedHeaderBytesForFormspec(-8);
+    const protectedHeader = protectedHeaderBytesForAlg(-8);
     const encoded = encodeCoseSign1(
       protectedHeader,
       new Uint8Array([1]),
       new Uint8Array([2]),
     );
-    const decoded = decodeFormspecCoseSign1(encoded);
+    const decoded = decodeCoseSign1(encoded);
     expect(() => resolvePayload(decoded, new Uint8Array([3]))).toThrow(
       /embedded COSE payload does not match/,
     );
+  });
+
+  it('decodeCoseSign1 rejects the retired profile_id label', () => {
+    const protectedHeader = protectedHeaderBytesWithProfileId(new Uint8Array(16).fill(0x11), 1);
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    expect(() => decodeCoseSign1(encoded)).toThrow(/RetiredProfileIdPresent/);
   });
 
   it('rejects duplicate protected-header labels', () => {
@@ -217,5 +225,17 @@ describe('consumer detached-signature envelopes (ADR 0109)', () => {
     const encoded = encodeCoseSign1(protectedHeader, new Uint8Array([1]), new Uint8Array(64));
 
     expect(extractMethodUri(encoded, SIG_PREFIX)).toBe(SIG_METHOD_URI);
+  });
+
+  it('decodeCoseSign1 rejects method_uri values over the byte cap', () => {
+    const methodUri = 'a'.repeat(MAX_METHOD_URI_LEN + 1);
+    const protectedHeader = detachedSignatureProtectedHeader(
+      -8,
+      new Uint8Array(16).fill(0x99),
+      methodUri,
+    );
+    const encoded = encodeCoseSign1(protectedHeader, null, new Uint8Array(64));
+
+    expect(() => decodeCoseSign1(encoded)).toThrow(/MethodUriTooLong/);
   });
 });

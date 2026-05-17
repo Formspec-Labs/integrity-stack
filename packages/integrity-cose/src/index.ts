@@ -14,6 +14,7 @@ export const COSE_LABEL_PROFILE_ID = -65_539;
 export const COSE_LABEL_METHOD_URI = -65_540;
 export const COSE_SIGN1_TAG = 18;
 export const SUITE_ID_PHASE_1 = 1;
+export const MAX_METHOD_URI_LEN = 512;
 export const WOS_PROFILE_ID = 1;
 export const FORMSPEC_PROFILE_ID = 2;
 
@@ -77,6 +78,7 @@ export function decodeCoseSign1(bytes: Uint8Array): CoseSign1 {
   if (!(protectedHeaderValue instanceof Map)) {
     throw new CoseError('protected header does not decode to a map');
   }
+  rejectRetiredProfileId(protectedHeaderValue);
   if (!(unprotectedValue instanceof Map)) {
     throw new CoseError('unprotected header is not a map');
   }
@@ -95,8 +97,12 @@ export function decodeCoseSign1(bytes: Uint8Array): CoseSign1 {
     alg: optionalIntegerLabel(protectedHeaderValue, COSE_LABEL_ALG),
     kid: optionalBytesLabel(protectedHeaderValue, COSE_LABEL_KID),
     suiteId: optionalUnsignedIntegerLabel(protectedHeaderValue, COSE_LABEL_SUITE_ID),
-    profileId: optionalUnsignedIntegerLabel(protectedHeaderValue, COSE_LABEL_PROFILE_ID),
-    methodUri: optionalTextLabel(protectedHeaderValue, COSE_LABEL_METHOD_URI),
+    profileId: null,
+    methodUri: optionalTextLabel(
+      protectedHeaderValue,
+      COSE_LABEL_METHOD_URI,
+      MAX_METHOD_URI_LEN,
+    ),
   };
 }
 
@@ -350,7 +356,11 @@ function optionalBytesLabel(map: Map<CborValue, CborValue>, label: number): Uint
   return value;
 }
 
-function optionalTextLabel(map: Map<CborValue, CborValue>, label: number): string | null {
+function optionalTextLabel(
+  map: Map<CborValue, CborValue>,
+  label: number,
+  maxUtf8Bytes?: number,
+): string | null {
   const value = map.get(label);
   if (value === undefined) {
     return null;
@@ -358,7 +368,18 @@ function optionalTextLabel(map: Map<CborValue, CborValue>, label: number): strin
   if (typeof value !== 'string') {
     throw new CoseError(`COSE label ${label} is not a text string`);
   }
+  if (maxUtf8Bytes !== undefined && new TextEncoder().encode(value).byteLength > maxUtf8Bytes) {
+    throw new CoseError(`MethodUriTooLong: method_uri exceeds ${maxUtf8Bytes} bytes`);
+  }
   return value;
+}
+
+function rejectRetiredProfileId(map: Map<CborValue, CborValue>): void {
+  if (map.has(COSE_LABEL_PROFILE_ID)) {
+    throw new CoseError(
+      'RetiredProfileIdPresent: retired profile_id protected-header label -65539 is present',
+    );
+  }
 }
 
 function unreachableProfileId(): never {
