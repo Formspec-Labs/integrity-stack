@@ -224,8 +224,8 @@ pub fn dcbor_bytes_to_json(bytes: &[u8]) -> Result<serde_json::Value, JsonCborEr
 /// or float negative zero (`-0.0`), matching deterministic JSON→dCBOR rules.
 #[cfg(feature = "json")]
 pub fn cbor_value_to_json(value: &Value) -> Result<serde_json::Value, JsonCborError> {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
 
     match value {
         Value::Null => Ok(serde_json::Value::Null),
@@ -608,9 +608,8 @@ mod tests {
 
     #[cfg(feature = "json")]
     use super::{
-        cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
+        JsonCborError, Value, cbor_value_to_json, json_to_cbor_value, json_to_dcbor_bytes,
         json_to_dcbor_bytes_with_limit, map_lookup_value, validate_json_f64_for_dcbor,
-        JsonCborError, Value,
     };
     use super::{
         decode_cbor_value, domain_separated_sha256, encode_bstr, encode_cbor_negative_int,
@@ -794,8 +793,8 @@ mod tests {
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_positive_infinity_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical(
-    ) {
+    fn given_f64_positive_infinity_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical()
+     {
         assert_eq!(
             validate_json_f64_for_dcbor(f64::INFINITY),
             Err(JsonCborError::FloatNotDcborCanonical)
@@ -804,8 +803,8 @@ mod tests {
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_negative_infinity_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical(
-    ) {
+    fn given_f64_negative_infinity_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical()
+     {
         assert_eq!(
             validate_json_f64_for_dcbor(f64::NEG_INFINITY),
             Err(JsonCborError::FloatNotDcborCanonical)
@@ -814,8 +813,8 @@ mod tests {
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_f64_negative_zero_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical(
-    ) {
+    fn given_f64_negative_zero_when_validate_json_f64_for_dcbor_then_rejects_float_not_dcbor_canonical()
+     {
         assert_eq!(
             validate_json_f64_for_dcbor(-0.0),
             Err(JsonCborError::FloatNotDcborCanonical)
@@ -841,8 +840,8 @@ mod tests {
 
     #[cfg(feature = "json")]
     #[test]
-    fn given_cbor_float_negative_zero_when_cbor_value_to_json_then_rejects_float_not_dcbor_canonical(
-    ) {
+    fn given_cbor_float_negative_zero_when_cbor_value_to_json_then_rejects_float_not_dcbor_canonical()
+     {
         assert_eq!(
             cbor_value_to_json(&Value::Float(-0.0)),
             Err(JsonCborError::FloatNotDcborCanonical)
