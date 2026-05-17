@@ -147,8 +147,15 @@ string_newtype!(SemVer);
 string_newtype!(Uri);
 string_newtype!(KidOrThumbprint);
 
+/// Domain tag for generic verification-receipt signed bytes.
+///
+/// This default is for generic integrity-stack receipts. Domain-specific
+/// facade crates can pass their own domain to
+/// [`canonical_receipt_payload_bytes_with_domain`].
+pub const RECEIPT_SIGNED_PAYLOAD_DOMAIN: &str = "integrity.verification.receipt.v1";
+
 /// Verifier-issued receipt for a reached signature verdict.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationReceipt {
     /// Reached verifier result.
@@ -172,7 +179,7 @@ pub struct VerificationReceipt {
 }
 
 /// Reached signature-verification result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VerificationResult {
     /// Signature verified under the selected method.
@@ -213,8 +220,44 @@ impl VerificationReceipt {
     }
 }
 
+/// Builds the canonical, domain-separated receipt-payload bytes.
+///
+/// The signed preimage is `domain || NUL || JCS(receipt_without_receiptBytes)`.
+/// `receiptBytes` is stripped before canonicalization so a signed receipt does
+/// not recursively commit to itself.
+///
+/// # Errors
+/// Returns an error when the receipt cannot serialize as a JSON object or JCS
+/// encoding fails.
+pub fn canonical_receipt_payload_bytes(receipt: &VerificationReceipt) -> Result<Vec<u8>, String> {
+    canonical_receipt_payload_bytes_with_domain(receipt, RECEIPT_SIGNED_PAYLOAD_DOMAIN)
+}
+
+/// Builds canonical receipt bytes with a caller-owned domain tag.
+///
+/// Domain-specific consumers use this to keep generic integrity-stack receipts
+/// separate from product-specific receipt commitments.
+///
+/// # Errors
+/// Returns an error when the receipt cannot serialize as a JSON object or JCS
+/// encoding fails.
+pub fn canonical_receipt_payload_bytes_with_domain(
+    receipt: &VerificationReceipt,
+    domain: &str,
+) -> Result<Vec<u8>, String> {
+    let mut value =
+        serde_json::to_value(receipt).map_err(|e| format!("receipt is not serializable: {e}"))?;
+    match value.as_object_mut() {
+        Some(map) => {
+            map.remove("receiptBytes");
+        }
+        None => return Err("receipt must serialize as a JSON object".to_string()),
+    }
+    integrity_canonical::domain_separated_canonical_bytes(domain, &value)
+}
+
 /// Verifier adapter metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterInfo {
     /// Stable adapter URI.
@@ -224,7 +267,7 @@ pub struct AdapterInfo {
 }
 
 /// Key metadata rendered into receipts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyInfo {
     /// Key reference.
@@ -238,7 +281,7 @@ pub struct KeyInfo {
 }
 
 /// Optional verification context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationContext {
     /// Revocation context.
@@ -253,7 +296,7 @@ pub struct VerificationContext {
 }
 
 /// Revocation evidence context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevocationContext {
     /// Revocation mechanism.
@@ -264,7 +307,7 @@ pub struct RevocationContext {
 }
 
 /// Timestamping evidence context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimestampingContext {
     /// Timestamping authority URI.
@@ -275,7 +318,7 @@ pub struct TimestampingContext {
 }
 
 /// Witness evidence context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WitnessContext {
     /// Trellis anchor reference.
@@ -283,7 +326,7 @@ pub struct WitnessContext {
 }
 
 /// Trellis witness anchor reference.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrellisAnchorRef {
     /// Event hash.

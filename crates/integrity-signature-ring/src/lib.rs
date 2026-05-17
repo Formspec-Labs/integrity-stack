@@ -1,8 +1,11 @@
 use integrity_signature::{
-    AdapterInfo, ClockHandle, KeyInfo, KeyRef, KeyResolverError, KeyResolverHandle, ReceiptSigner,
-    ReceiptSignerError, ReceiptSignerHandle, SignatureMethodRegistry, StaticKeyResolver,
-    SystemClock, VerificationReceipt, VerificationResult, Verifier, VerifierError, VerifyRequest,
-    utc_to_rfc3339_seconds,
+    AdapterInfo, ClockHandle, KeyInfo, KeyRef, KeyResolverError, KeyResolverHandle,
+    RECEIPT_SIGNED_PAYLOAD_DOMAIN, ReceiptSigner, ReceiptSignerError, ReceiptSignerHandle,
+    SignatureMethodRegistry, StaticKeyResolver, SystemClock, VerificationReceipt,
+    VerificationResult, Verifier, VerifierError, VerifyRequest, utc_to_rfc3339_seconds,
+};
+pub use integrity_signature::{
+    canonical_receipt_payload_bytes, canonical_receipt_payload_bytes_with_domain,
 };
 use ring::rand::SystemRandom;
 use ring::signature;
@@ -18,13 +21,6 @@ pub const DEFAULT_RECEIPT_METHOD_URI: &str =
 pub const DEFAULT_RECEIPT_METHOD_URI_PREFIX: &str = "urn:integrity-stack:receipt-method:";
 pub const DEFAULT_IN_PROCESS_RECEIPT_SIGNER_ID: &str =
     "urn:integrity-stack:receipt-signer:ring-in-process@1";
-
-/// Domain tag for generic verification-receipt signed bytes.
-///
-/// Parallels [`integrity_canonical::DOMAIN_SEPARATION`] (response signing).
-/// Disjoint preimage space — a verification receipt is a distinct
-/// commitment from the response it audits. fs-migs.
-pub const RECEIPT_SIGNED_PAYLOAD_DOMAIN: &str = "integrity.verification.receipt.v1";
 
 #[derive(Debug, Clone)]
 pub struct RingVerifierConfig {
@@ -62,41 +58,6 @@ impl RingVerifierConfig {
         self.receipt_payload_domain = domain.into();
         self
     }
-}
-
-/// Builds the canonical, domain-separated receipt-payload bytes that a
-/// [`ReceiptSigner`] signs.
-///
-/// Shape: `domain || NUL || JCS(receipt_without_receipt_bytes)`. Built atop
-/// [`integrity_canonical::domain_separated_canonical_bytes`] so the byte
-/// authority lives in one place across response signing and receipt
-/// signing.
-///
-/// The `receipt_bytes` field is stripped before canonicalization — a
-/// signature must commit to the receipt body, not to itself, otherwise
-/// the digest is non-recoverable on the verifier side.
-///
-/// # Errors
-///
-/// Returns an error when the receipt does not serialize as a JSON object
-/// or canonical JSON encoding fails.
-pub fn canonical_receipt_payload_bytes(receipt: &VerificationReceipt) -> Result<Vec<u8>, String> {
-    canonical_receipt_payload_bytes_with_domain(receipt, RECEIPT_SIGNED_PAYLOAD_DOMAIN)
-}
-
-pub fn canonical_receipt_payload_bytes_with_domain(
-    receipt: &VerificationReceipt,
-    domain: &str,
-) -> Result<Vec<u8>, String> {
-    let mut value =
-        serde_json::to_value(receipt).map_err(|e| format!("receipt is not serializable: {e}"))?;
-    match value.as_object_mut() {
-        Some(map) => {
-            map.remove("receiptBytes");
-        }
-        None => return Err("receipt must serialize as a JSON object".to_string()),
-    }
-    integrity_canonical::domain_separated_canonical_bytes(domain, &value)
 }
 
 pub struct RingVerifier {

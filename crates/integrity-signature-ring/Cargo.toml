@@ -8,7 +8,6 @@ repository = "https://github.com/Formspec-org/formspec"
 
 [dependencies]
 base64 = "0.22"
-integrity-canonical = { path = "../integrity-canonical" }
 integrity-cose = { path = "../integrity-cose" }
 integrity-signature = { path = "../integrity-signature" }
 ring = "0.17"
