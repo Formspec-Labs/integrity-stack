@@ -1,11 +1,12 @@
 use integrity_signature::{
-    AdapterInfo, ClockHandle, KeyInfo, KeyRef, KeyResolverError, KeyResolverHandle,
-    RECEIPT_SIGNED_PAYLOAD_DOMAIN, ReceiptSigner, ReceiptSignerError, ReceiptSignerHandle,
-    SignatureMethodRegistry, StaticKeyResolver, SystemClock, VerificationReceipt,
-    VerificationResult, Verifier, VerifierError, VerifyRequest, utc_to_rfc3339_seconds,
+    AdapterInfo, ClockHandle, KeyInfo, KeyRef, KeyResolverError, KeyResolverHandle, ReceiptSigner,
+    ReceiptSignerError, ReceiptSignerHandle, SignatureMethodRegistry, StaticKeyResolver,
+    SystemClock, VerificationReceipt, VerificationResult, Verifier, VerifierError, VerifyRequest,
+    utc_to_rfc3339_seconds,
 };
 pub use integrity_signature::{
-    canonical_receipt_payload_bytes, canonical_receipt_payload_bytes_with_domain,
+    RECEIPT_SIGNED_PAYLOAD_DOMAIN, canonical_receipt_payload_bytes,
+    canonical_receipt_payload_bytes_with_domain,
 };
 use ring::rand::SystemRandom;
 use ring::signature;
