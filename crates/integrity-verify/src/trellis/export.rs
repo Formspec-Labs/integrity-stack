@@ -8,8 +8,8 @@ use trellis_types::{
 };
 
 use super::{
-    ALG_EDDSA, SUITE_ID_PHASE_1_I128, attachment_entry_matches_binding,
-    verify_event_set_with_classes, verify_signature,
+    ALG_EDDSA, INTEROP_SIDECARS_PATH_PREFIX, SUITE_ID_PHASE_1_I128,
+    attachment_entry_matches_binding, verify_event_set_with_classes, verify_signature,
 };
 use crate::trellis::certificate::{
     verify_certificate_attachment_lineage, verify_certificate_catalog,
@@ -978,6 +978,29 @@ pub(crate) fn verify_export_zip_with_record_validator(
         }
     }
 
+    // Core §19 step 3.i — generic bundle_unbound_member sweep. Enumerates
+    // members admitted by Core §18.2 + manifest semantics; anything else
+    // surfaces `bundle_unbound_member`. Per the §19 step 3.i both-fire
+    // rule, this sweep fires INDEPENDENTLY of per-extension `*_unbound`
+    // findings (e.g. `supersession_graph_unbound`, `policy_closure_unbound`);
+    // a per-extension finding does NOT suppress the generic sweep.
+    // Traceability: TR-CORE-181.
+    let bound_members = build_bound_member_set(
+        manifest_map,
+        &parsed_bindings,
+        &events,
+        &payload_blobs,
+        &archive,
+    );
+    for member_path in archive.members.keys() {
+        if !bound_members.contains(member_path) {
+            report.event_failures.push(VerificationFailure::new(
+                VerificationFailureKind::BundleUnboundMember,
+                member_path.clone(),
+            ));
+        }
+    }
+
     report.structure_verified = true;
     report.integrity_verified = VerificationReport::integrity_verified_from_parts(
         &report.event_failures,
@@ -991,6 +1014,198 @@ pub(crate) fn verify_export_zip_with_record_validator(
     );
     report.readability_verified = true;
     report
+}
+
+/// Core §19 step 3.i admitted-member-set builder. Enumerates archive members
+/// that are bound by either Core §18.2's always-admitted set OR by data
+/// inside the signed manifest (top-level digest fields, `registry_bindings`,
+/// `interop_sidecars[].path`, registered manifest extensions and their fixed
+/// member names / `catalog_ref` values). Members under `interop-sidecars/`
+/// are admitted wholesale because `verify_interop_sidecars` has already
+/// fatal-aborted any unlisted file.
+fn build_bound_member_set(
+    manifest_map: &[(ciborium::Value, ciborium::Value)],
+    parsed_bindings: &[RegistryBindingInfo],
+    events: &[ParsedSign1],
+    payload_blobs: &BTreeMap<[u8; 32], Vec<u8>>,
+    archive: &ExportArchive,
+) -> BTreeSet<String> {
+    let mut bound: BTreeSet<String> = BTreeSet::new();
+
+    // §18.2 always-required core members.
+    for required in [
+        "000-manifest.cbor",
+        "010-events.cbor",
+        "020-inclusion-proofs.cbor",
+        "025-consistency-proofs.cbor",
+        "030-signing-key-registry.cbor",
+        "040-checkpoints.cbor",
+    ] {
+        bound.insert(required.to_string());
+    }
+
+    // §18.2 always-admitted helper members. `099-trellis-cli-*` is a
+    // prefix family covering linux-x86_64, linux-aarch64, darwin-arm64,
+    // windows-x86_64.exe per the §18.2 table.
+    for helper in ["090-verify.sh", "098-README.md"] {
+        bound.insert(helper.to_string());
+    }
+    for member_path in archive.members.keys() {
+        if member_path.starts_with("099-trellis-cli-") {
+            bound.insert(member_path.clone());
+        }
+        // verify_interop_sidecars already fatal-aborts unlisted files
+        // under this prefix; reaching the sweep means every present
+        // member here passed the manifest-listing check.
+        if member_path.starts_with(INTEROP_SIDECARS_PATH_PREFIX) {
+            bound.insert(member_path.clone());
+        }
+    }
+
+    // §14 registry bindings → 050-registries/<digest_hex>.cbor.
+    for binding in parsed_bindings {
+        bound.insert(format!("050-registries/{}.cbor", binding.digest_hex));
+    }
+
+    // §18.2 payload binding — each event's content_hash names a
+    // 060-payloads/<hex>.bin member when externalized; the same hex is
+    // legitimate for inlined payloads too if the writer chose to also
+    // embed bytes. Admit both shapes.
+    for event in events {
+        if let Ok(details) = decode_event_details(event) {
+            bound.insert(format!(
+                "060-payloads/{}.bin",
+                hex_string(&details.content_hash)
+            ));
+        }
+    }
+    for digest in payload_blobs.keys() {
+        bound.insert(format!("060-payloads/{}.bin", hex_string(digest)));
+    }
+
+    // §18.3a interop_sidecars[].path admits listed sidecars individually.
+    // The `interop-sidecars/` prefix walk above already covered them, but
+    // also admit by literal path in case a manifest authoring quirk lists
+    // a path outside the conventional prefix (which `verify_interop_sidecars`
+    // would have fatal-aborted earlier; this branch is defensive).
+    if let Ok(Some(entries)) = lookup_optional_array(manifest_map, "interop_sidecars") {
+        for entry in entries {
+            if let Some(entry_map) = entry.as_map()
+                && let Ok(path) = trellis_types::map_lookup_text(entry_map, "path")
+            {
+                bound.insert(path);
+            }
+        }
+    }
+
+    // Registered manifest extensions admit fixed-name and catalog_ref
+    // members. The substrate verifier validates a subset of these
+    // extensions (attachments, certificates, erasure, supersession,
+    // open-clocks, seal-fence). For consumer-bound extensions validated
+    // in `trellis-verify-wos` (signed-acts, signed-acts.manifest,
+    // policy-closure, signature-affirmations, intake-handoffs,
+    // witness-key-registry), the substrate sweep admits the spec-pinned
+    // member name when the URI is present so the generic sweep cannot
+    // fail a current valid export.
+    if let Ok(Some(extensions)) = lookup_optional_map(manifest_map, "extensions") {
+        for (key, value) in extensions {
+            let Some(uri) = key.as_text() else {
+                continue;
+            };
+            match uri {
+                // Substrate-validated extensions with fixed member names.
+                "trellis.export.attachments.v1" => {
+                    bound.insert("061-attachments.cbor".to_string());
+                }
+                "trellis.export.supersession-graph.v1" => {
+                    bound.insert("064-supersession-graph.json".to_string());
+                    // Admit 070-predecessors/<bundle_path> for each
+                    // predecessor with non-null `bundle_path` named in
+                    // the graph member (best-effort; an unparseable
+                    // graph member is already surfaced as
+                    // `supersession_graph_invalid` elsewhere and the
+                    // sweep keeps the predecessor members unbound,
+                    // which is safe — they have no other binding).
+                    if let Some(graph_bytes) = archive.members.get("064-supersession-graph.json")
+                        && let Ok(graph) =
+                            crate::trellis::supersession::parse_supersession_graph(graph_bytes)
+                    {
+                        for predecessor in &graph.predecessors {
+                            if let Some(path) = &predecessor.bundle_path {
+                                bound.insert(path.clone());
+                            }
+                        }
+                    }
+                }
+                "trellis.export.open-clocks.v1" => {
+                    bound.insert("open-clocks.json".to_string());
+                }
+                // Substrate-validated extensions with `catalog_ref`.
+                "trellis.export.certificates-of-completion.v1"
+                | "trellis.export.erasure-evidence.v1" => {
+                    if let Some(extension_map) = value.as_map()
+                        && let Ok(catalog_ref) =
+                            trellis_types::map_lookup_text(extension_map, "catalog_ref")
+                    {
+                        bound.insert(catalog_ref);
+                    }
+                }
+                // Consumer-bound extensions (validated in trellis-verify-wos).
+                // Admit the spec-pinned fixed member names per Core §18.2 so
+                // the generic sweep cannot reject a current valid export.
+                "trellis.export.witness-key-registry.v1" => {
+                    bound.insert("031-witness-key-registry.cbor".to_string());
+                }
+                "trellis.export.signed-acts.v1" => {
+                    bound.insert("066-signed-acts.cbor".to_string());
+                }
+                "trellis.export.signed-acts.manifest.v1" => {
+                    bound.insert("068-signed-acts-manifest.cbor".to_string());
+                }
+                "trellis.export.policy-closure.v1" => {
+                    bound.insert("067-policy-closure.cbor".to_string());
+                }
+                "trellis.export.signature-affirmations.v1" => {
+                    bound.insert("062-signature-affirmations.cbor".to_string());
+                }
+                "trellis.export.intake-handoffs.v1" => {
+                    bound.insert("063-intake-handoffs.cbor".to_string());
+                }
+                // Seal-fence is manifest-extension-only with no member binding.
+                "trellis.export.seal-fence.v1" => {}
+                _ => {
+                    // Unknown extensions cannot admit members. Members
+                    // they implicitly reference will surface as
+                    // `bundle_unbound_member` until the extension lands
+                    // in the registered set.
+                }
+            }
+        }
+    }
+
+    bound
+}
+
+fn lookup_optional_array(
+    manifest_map: &[(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Result<Option<Vec<ciborium::Value>>, VerifyError> {
+    match trellis_types::map_lookup_optional_value(manifest_map, key) {
+        Some(ciborium::Value::Array(entries)) => Ok(Some(entries.clone())),
+        Some(ciborium::Value::Null) | None => Ok(None),
+        Some(_) => Err(VerifyError::new(format!("{key} must be an array or null"))),
+    }
+}
+
+fn lookup_optional_map(
+    manifest_map: &[(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Result<Option<Vec<(ciborium::Value, ciborium::Value)>>, VerifyError> {
+    match trellis_types::map_lookup_optional_value(manifest_map, key) {
+        Some(ciborium::Value::Map(entries)) => Ok(Some(entries.clone())),
+        Some(ciborium::Value::Null) | None => Ok(None),
+        Some(_) => Err(VerifyError::new(format!("{key} must be a map or null"))),
+    }
 }
 
 fn verify_seal_fence_extension(
@@ -1207,6 +1422,105 @@ mod tests {
                 "{tamper:?} should include {expected_warning:?}: {report:#?}"
             );
         }
+    }
+
+    /// Core §19 step 3.i — bundle_unbound_member sweep. A stray archive
+    /// member that is not in the §18.2 admitted set, not named by a
+    /// manifest top-level digest, not bound by a registry binding,
+    /// not bound by an event content_hash, not listed under
+    /// `interop_sidecars[].path`, and not bound by any registered
+    /// manifest extension MUST surface `bundle_unbound_member` and
+    /// MUST drive `integrity_verified` to false. TR-CORE-181.
+    #[test]
+    fn verify_export_zip_flags_stray_archive_member_as_bundle_unbound_member() {
+        let (zip_bytes, _signing_key) = sealed_export_package();
+        let stray_member_path = "999-stray.bin";
+        let tampered = inject_stray_member(&zip_bytes, stray_member_path, b"stray bytes");
+
+        let report = verify_export_zip(&tampered);
+
+        assert!(
+            report.structure_verified,
+            "stray-member injection should not break structure: {report:#?}"
+        );
+        let stray_failure = report
+            .event_failures
+            .iter()
+            .find(|failure| failure.kind == VerificationFailureKind::BundleUnboundMember);
+        assert!(
+            stray_failure.is_some(),
+            "expected bundle_unbound_member finding for stray member: {:#?}",
+            report.event_failures
+        );
+        assert_eq!(
+            stray_failure.unwrap().location,
+            stray_member_path,
+            "bundle_unbound_member should locate the stray member path"
+        );
+        assert!(
+            !report.integrity_verified,
+            "integrity_verified must be false when a member is unbound: {report:#?}"
+        );
+    }
+
+    /// Core §19 step 3.i both-fire rule. When a member is unbound both
+    /// per a per-extension `*_unbound` rule (here:
+    /// `supersession_graph_unbound`, fired when
+    /// `064-supersession-graph.json` is present without
+    /// `trellis.export.supersession-graph.v1`) AND per the generic
+    /// sweep, BOTH findings MUST appear; the per-extension finding
+    /// MUST NOT suppress the generic sweep. TR-CORE-181.
+    #[test]
+    fn verify_export_zip_fires_both_supersession_unbound_and_bundle_unbound_member() {
+        let (zip_bytes, _signing_key) = sealed_export_package();
+        // Sealed export does not bind a supersession-graph member; inject
+        // 064-supersession-graph.json without the manifest extension.
+        let tampered = inject_stray_member(&zip_bytes, "064-supersession-graph.json", b"{}\n");
+
+        let report = verify_export_zip(&tampered);
+
+        let supersession_unbound = report
+            .event_failures
+            .iter()
+            .any(|failure| failure.kind == VerificationFailureKind::SupersessionGraphUnbound);
+        let bundle_unbound = report.event_failures.iter().any(|failure| {
+            failure.kind == VerificationFailureKind::BundleUnboundMember
+                && failure.location == "064-supersession-graph.json"
+        });
+        assert!(
+            supersession_unbound,
+            "supersession_graph_unbound MUST fire: {:#?}",
+            report.event_failures
+        );
+        assert!(
+            bundle_unbound,
+            "bundle_unbound_member MUST also fire (no suppression): {:#?}",
+            report.event_failures
+        );
+        assert!(
+            !report.integrity_verified,
+            "integrity_verified must be false: {report:#?}"
+        );
+    }
+
+    fn inject_stray_member(zip_bytes: &[u8], stray_path: &str, stray_bytes: &[u8]) -> Vec<u8> {
+        let entries = read_stored_zip(zip_bytes).expect("read fixture export ZIP");
+        // Recover the export-root directory (e.g. `trellis-export-...-shorthash/`)
+        // from any existing entry so the stray member lives under the
+        // same root — `parse_export_zip` requires exactly one root.
+        let root = entries
+            .iter()
+            .find_map(|entry| entry.path().split_once('/').map(|(root, _)| root.to_string()))
+            .expect("fixture export has a root directory");
+        let mut bundle = Bundle::new();
+        for entry in &entries {
+            bundle.add_entry(BundleEntry::new(entry.path().to_string(), entry.bytes().to_vec()));
+        }
+        bundle.add_entry(BundleEntry::new(
+            format!("{root}/{stray_path}"),
+            stray_bytes.to_vec(),
+        ));
+        bundle.to_zip_bytes().expect("rebuild ZIP with stray member")
     }
 
     fn sealed_export_package() -> (Vec<u8>, WriterSigningKey) {
