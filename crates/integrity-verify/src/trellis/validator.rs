@@ -113,10 +113,18 @@ impl RelyingPartyVerdict {
             blocking_reasons.push("substrate_integrity".to_string());
         }
         if projection_integrity == VerdictState::Fail {
-            let reason = if findings
-                .iter()
-                .any(|finding| finding.kind == "signed_acts_projection_mismatch")
-            {
+            // `signed_acts_render_drift` is advisory (not Failure), so it cannot
+            // trigger this branch. Retain the historical substrate-shape kinds as
+            // projection_mismatch reasons because they currently classify here.
+            let reason = if findings.iter().any(|finding| {
+                matches!(
+                    finding.kind.as_str(),
+                    "missing_signed_acts_catalog"
+                        | "signed_acts_catalog_digest_mismatch"
+                        | "signed_acts_catalog_invalid"
+                        | "signed_acts_catalog_unbound"
+                )
+            }) {
                 "projection_mismatch"
             } else {
                 "projection_integrity"
@@ -261,6 +269,22 @@ pub trait RecordValidator {
 
 impl RecordValidator for () {}
 
+/// Classifies a domain finding as a projection finding (advisory-eligible)
+/// rather than a substrate-damage / declaration-violation finding (blocking).
+///
+/// Projection findings can be demoted to advisory when render drift is acceptable;
+/// structural findings cannot — they signal that the export bundle itself is
+/// malformed, missing a declared member, or has a mismatched binding digest.
+///
+/// The structural-shape kinds (`missing_signed_acts_catalog`,
+/// `signed_acts_catalog_digest_mismatch`, `signed_acts_catalog_invalid`,
+/// `signed_acts_catalog_unbound`) are retained here for historical compatibility
+/// with the relying-party verdict path. They are emitted with
+/// `Severity::Failure`, so listing them here only affects which
+/// `blocking_reasons` bucket they land in (`projection_integrity` vs
+/// `domain_admissibility`). The 068 manifest-extension verification kinds
+/// (`signed_acts_manifest_*`) are NOT projection findings — they are substrate
+/// damage / declaration violations and must surface under `domain_admissibility`.
 fn is_projection_finding(finding: &DomainFinding) -> bool {
     matches!(
         finding.kind.as_str(),
@@ -268,7 +292,7 @@ fn is_projection_finding(finding: &DomainFinding) -> bool {
             | "signed_acts_catalog_digest_mismatch"
             | "signed_acts_catalog_invalid"
             | "signed_acts_catalog_unbound"
-            | "signed_acts_projection_mismatch"
+            | "signed_acts_render_drift"
     )
 }
 
@@ -277,7 +301,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_failure_keeps_crypto_pass_but_relying_party_fails() {
+    fn projection_structural_failure_keeps_crypto_pass_but_relying_party_fails() {
+        // Structural-shape failure (catalog declared but member missing) is
+        // blocking and surfaces under projection_integrity per the structural
+        // kind retained in `is_projection_finding`.
         let substrate = VerificationReport {
             structure_verified: true,
             integrity_verified: true,
@@ -285,10 +312,10 @@ mod tests {
             ..VerificationReport::default()
         };
         let findings = vec![DomainFinding::new(
-            "signed_acts_projection_mismatch",
+            "missing_signed_acts_catalog",
             None,
             Severity::Failure,
-            "projection mismatch",
+            "066-signed-acts.cbor missing from export",
         )];
 
         let verdict = RelyingPartyVerdict::from_parts(&substrate, &findings);
@@ -298,5 +325,58 @@ mod tests {
         assert_eq!(verdict.domain_admissibility, VerdictState::Pass);
         assert_eq!(verdict.relying_party_result, RelyingPartyResult::Invalid);
         assert_eq!(verdict.blocking_reasons, ["projection_mismatch"]);
+    }
+
+    #[test]
+    fn signed_acts_render_drift_is_advisory_and_does_not_block() {
+        // Render drift is `Severity::Advisory`, so it must not flip any verdict
+        // tier to Fail or appear in `blocking_reasons`.
+        let substrate = VerificationReport {
+            structure_verified: true,
+            integrity_verified: true,
+            readability_verified: true,
+            ..VerificationReport::default()
+        };
+        let findings = vec![DomainFinding::new(
+            "signed_acts_render_drift",
+            None,
+            Severity::Advisory,
+            "066 catalog does not match deterministic derivation",
+        )];
+
+        let verdict = RelyingPartyVerdict::from_parts(&substrate, &findings);
+
+        assert_eq!(verdict.cryptographic_integrity, VerdictState::Pass);
+        assert_eq!(verdict.projection_integrity, VerdictState::Pass);
+        assert_eq!(verdict.domain_admissibility, VerdictState::Pass);
+        assert_eq!(verdict.relying_party_result, RelyingPartyResult::Valid);
+        assert!(verdict.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn signed_acts_manifest_mismatch_blocks_under_domain_admissibility() {
+        // 068 manifest-extension failures are substrate damage, not projection
+        // drift, so they surface under domain_admissibility (NOT
+        // projection_integrity) per the comment on `is_projection_finding`.
+        let substrate = VerificationReport {
+            structure_verified: true,
+            integrity_verified: true,
+            readability_verified: true,
+            ..VerificationReport::default()
+        };
+        let findings = vec![DomainFinding::new(
+            "signed_acts_manifest_mismatch",
+            None,
+            Severity::Failure,
+            "068 manifest bytes do not match deterministic derivation",
+        )];
+
+        let verdict = RelyingPartyVerdict::from_parts(&substrate, &findings);
+
+        assert_eq!(verdict.cryptographic_integrity, VerdictState::Pass);
+        assert_eq!(verdict.projection_integrity, VerdictState::Pass);
+        assert_eq!(verdict.domain_admissibility, VerdictState::Fail);
+        assert_eq!(verdict.relying_party_result, RelyingPartyResult::Invalid);
+        assert_eq!(verdict.blocking_reasons, ["domain_admissibility"]);
     }
 }
