@@ -1510,17 +1510,27 @@ mod tests {
         // same root — `parse_export_zip` requires exactly one root.
         let root = entries
             .iter()
-            .find_map(|entry| entry.path().split_once('/').map(|(root, _)| root.to_string()))
+            .find_map(|entry| {
+                entry
+                    .path()
+                    .split_once('/')
+                    .map(|(root, _)| root.to_string())
+            })
             .expect("fixture export has a root directory");
         let mut bundle = Bundle::new();
         for entry in &entries {
-            bundle.add_entry(BundleEntry::new(entry.path().to_string(), entry.bytes().to_vec()));
+            bundle.add_entry(BundleEntry::new(
+                entry.path().to_string(),
+                entry.bytes().to_vec(),
+            ));
         }
         bundle.add_entry(BundleEntry::new(
             format!("{root}/{stray_path}"),
             stray_bytes.to_vec(),
         ));
-        bundle.to_zip_bytes().expect("rebuild ZIP with stray member")
+        bundle
+            .to_zip_bytes()
+            .expect("rebuild ZIP with stray member")
     }
 
     fn sealed_export_package() -> (Vec<u8>, WriterSigningKey) {
