@@ -1,5 +1,5 @@
 {
-  "name": "@integrity-stack/signature-port",
+  "name": "@formspec-org/integrity-signature-port",
   "version": "0.1.0",
   "description": "Generic signature verifier port and verification receipt types",
   "type": "module",

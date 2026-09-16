@@ -1,5 +1,5 @@
 {
-  "name": "@integrity-stack/cose",
+  "name": "@formspec-org/integrity-cose",
   "version": "0.1.0",
   "description": "TypeScript COSE_Sign1 byte helpers and method dispatch enforcement",
   "type": "module",

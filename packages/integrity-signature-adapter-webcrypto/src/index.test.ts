@@ -7,8 +7,8 @@ import {
   encodeCoseSign1,
   detachedSignatureProtectedHeader as protectedHeaderBytes,
   sigStructureBytes,
-} from '@integrity-stack/cose';
-import { protectedHeaderBytesForAlg } from '@integrity-stack/cose';
+} from '@formspec-org/integrity-cose';
+import { protectedHeaderBytesForAlg } from '@formspec-org/integrity-cose';
 import { WebCryptoVerifier, decodeCoseSign1 } from './index';
 import {
   keyRefKid,
@@ -19,7 +19,7 @@ import {
   StaticKeyResolver,
   uri,
   VerifierError,
-} from '@integrity-stack/signature-port';
+} from '@formspec-org/integrity-signature-port';
 
 // Method-URI constants used to build COSE protected headers in tests. Per
 // ADR 0109 these are the dispatch axis carried inside the signed protected

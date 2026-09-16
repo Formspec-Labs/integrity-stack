@@ -8,13 +8,13 @@ Trellis and the Workflow Orchestration Standard; the rest of the stack is indexe
 
 ## Packages
 
-npm, published from this repository (`@integrity-stack/*`):
+npm, published from this repository under the stack's `@formspec-org` scope:
 
 | Package | What it is |
 |---|---|
-| [`@integrity-stack/signature-port`](packages/integrity-signature-port) | The signature verifier port and the verification receipt types every adapter returns. |
-| [`@integrity-stack/cose`](packages/integrity-cose) | COSE_Sign1 byte helpers and method dispatch enforcement. |
-| [`@integrity-stack/signature-adapter-webcrypto`](packages/integrity-signature-adapter-webcrypto) | The port implemented on WebCrypto, for browsers and Node. |
+| [`@formspec-org/integrity-signature-port`](packages/integrity-signature-port) | The signature verifier port and the verification receipt types every adapter returns. |
+| [`@formspec-org/integrity-cose`](packages/integrity-cose) | COSE_Sign1 byte helpers and method dispatch enforcement. |
+| [`@formspec-org/integrity-signature-adapter-webcrypto`](packages/integrity-signature-adapter-webcrypto) | The port implemented on WebCrypto, for browsers and Node. |
 
 Rust crates live under [`crates/`](crates/) (`integrity-*`; see `Cargo.toml` for the workspace members) and
 are consumed by sibling path from the stack checkout.

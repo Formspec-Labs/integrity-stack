@@ -1,6 +1,6 @@
 name: Publish npm
 
-# Publishes the @integrity-stack/* packages through npm Trusted Publishing (OIDC; no token in the
+# Publishes the @formspec-org/integrity-* packages through npm Trusted Publishing (OIDC; no token in the
 # repository): each package's settings on npmjs.com name this repository and this workflow file. Each
 # package is published only when its package.json version is not on the registry yet, in dependency
 # order, so re-running a tag is safe. A package's first version cannot be created over OIDC — publish

@@ -1,5 +1,5 @@
 {
-  "name": "@integrity-stack/signature-adapter-webcrypto",
+  "name": "@formspec-org/integrity-signature-adapter-webcrypto",
   "version": "0.1.0",
   "description": "Generic WebCrypto signature adapter",
   "type": "module",
@@ -30,8 +30,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@integrity-stack/cose": "^0.1.0",
-    "@integrity-stack/signature-port": "^0.1.0"
+    "@formspec-org/integrity-cose": "^0.1.0",
+    "@formspec-org/integrity-signature-port": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

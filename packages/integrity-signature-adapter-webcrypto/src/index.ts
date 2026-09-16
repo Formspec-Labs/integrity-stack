@@ -4,7 +4,7 @@ import {
   resolvePayload,
   sigStructureBytes,
   type CoseSign1,
-} from '@integrity-stack/cose';
+} from '@formspec-org/integrity-cose';
 import {
   Verifier,
   VerificationReceipt,
@@ -23,7 +23,7 @@ import {
   semVer,
   uri,
   kidOrThumbprint,
-} from '@integrity-stack/signature-port';
+} from '@formspec-org/integrity-signature-port';
 
 const DEFAULT_ADAPTER_ID = 'urn:integrity-stack:adapter:webcrypto@1';
 const DEFAULT_ADAPTER_VERSION = '0.1.0';
@@ -644,4 +644,4 @@ function derLengthBytes(length: number): Uint8Array {
   return new Uint8Array([0x80 | bytes.length, ...bytes]);
 }
 
-export { decodeCoseSign1 } from '@integrity-stack/cose';
+export { decodeCoseSign1 } from '@formspec-org/integrity-cose';
