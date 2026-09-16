@@ -1,8 +1,14 @@
+# Its own workspace root: this crate reaches the `trellis` sibling (and, through it, the private
+# `stack-common`) by path, so it is excluded from the repository workspace (see ../../Cargo.toml) and
+# builds where those siblings are checked out.
+[workspace]
+
 [package]
 name = "integrity-verify"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Formspec-Labs/integrity-stack"
 description = "Universal verification phase for integrity envelopes (COSE_Sign1, JCS, deterministic bundles)"
 
 [dependencies]

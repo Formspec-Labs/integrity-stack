@@ -17,7 +17,9 @@ npm, published from this repository under the stack's `@formspec-org` scope:
 | [`@formspec-org/integrity-signature-adapter-webcrypto`](packages/integrity-signature-adapter-webcrypto) | The port implemented on WebCrypto, for browsers and Node. |
 
 Rust crates live under [`crates/`](crates/) (`integrity-*`; see `Cargo.toml` for the workspace members) and
-are consumed by sibling path from the stack checkout.
+are consumed by sibling path from the stack checkout. The three `integrity-verify*` crates reach the
+`trellis` and `stack-common` siblings by path, so they sit outside the default workspace and build where
+those siblings are checked out (`cargo nextest run --manifest-path crates/<crate>/Cargo.toml`).
 
 ## Build and test
 

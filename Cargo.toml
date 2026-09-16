@@ -1,4 +1,9 @@
 [workspace]
+# This workspace builds from a checkout of THIS repository alone. The three verification crates below
+# reach the `trellis`, `work-spec` and (private) `stack-common` siblings by path, and cargo resolves every
+# member's manifest before it does anything, so keeping them in would make a lone checkout unbuildable.
+# They are excluded, not deleted: each is its own workspace root, and the stack's `make test-integrity-stack`
+# runs them wherever the siblings are present.
 members = [
     "crates/integrity-bundle",
     "crates/integrity-bundle-fixtures",
@@ -10,12 +15,14 @@ members = [
     "crates/integrity-seam",
     "crates/integrity-signature",
     "crates/integrity-signature-ring",
-    "crates/integrity-verify",
-    "crates/integrity-verify-parity",
-    "crates/integrity-verify-cli",
 ]
 resolver = "2"
-exclude = ["fuzz"]
+exclude = [
+    "crates/integrity-verify",
+    "crates/integrity-verify-cli",
+    "crates/integrity-verify-parity",
+    "fuzz",
+]
 
 [workspace.package]
 version = "0.1.0"
