@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Generic signature verification, key resolution, and receipt-signing ports"
-repository = "https://github.com/Formspec-org/formspec"
+repository = "https://github.com/Formspec-Labs/integrity-stack"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

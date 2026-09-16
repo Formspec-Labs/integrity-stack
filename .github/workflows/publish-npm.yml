@@ -1,0 +1,46 @@
+name: Publish npm
+
+# Publishes the @integrity-stack/* packages through npm Trusted Publishing (OIDC; no token in the
+# repository): each package's settings on npmjs.com name this repository and this workflow file. Each
+# package is published only when its package.json version is not on the registry yet, in dependency
+# order, so re-running a tag is safe. A package's first version cannot be created over OIDC — publish
+# that one by hand, then attach the trusted publisher.
+on:
+  push:
+    tags: ["npm-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'Formspec-Labs/integrity-stack'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      # Trusted publishing requires npm CLI >= 11.5.1; Node 22 images still ship npm 10.x.
+      - name: Install npm for Trusted Publishing
+        run: npm install -g npm@^11.5.1
+      - run: npm ci
+      - run: npm test
+      - name: Publish, in dependency order, whatever is not on npm yet
+        run: |
+          set -euo pipefail
+          for dir in integrity-signature-port integrity-cose integrity-signature-adapter-webcrypto; do
+            name=$(node -p "require('./packages/$dir/package.json').name")
+            local=$(node -p "require('./packages/$dir/package.json').version")
+            if npm view "$name@$local" version >/dev/null 2>&1; then
+              echo "$name $local is on npm already; skipping"
+              continue
+            fi
+            echo "publishing $name $local"
+            npm publish -w "packages/$dir" --provenance --access public
+          done

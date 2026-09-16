@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Shared canonical JSON byte primitives for integrity profiles"
-repository = "https://github.com/Formspec-org/formspec-stack"
+repository = "https://github.com/Formspec-Labs/integrity-stack"
 
 [dependencies]
 hex = "0.4"

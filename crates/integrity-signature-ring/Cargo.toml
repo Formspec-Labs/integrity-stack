@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Generic ring-crypto signature adapter for integrity-signature"
-repository = "https://github.com/Formspec-org/formspec"
+repository = "https://github.com/Formspec-Labs/integrity-stack"
 
 [dependencies]
 base64 = "0.22"
