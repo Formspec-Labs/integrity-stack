@@ -12,7 +12,7 @@ npm, published from this repository under the stack's `@formspec-org` scope:
 
 | Package | What it is |
 |---|---|
-| [`@formspec-org/integrity-canonical`](packages/integrity-canonical) | Full-Response intake handoff bytes matching the Rust canonical authority. |
+| [`@formspec-org/integrity-canonical`](packages/integrity-canonical) | Distinct Response handoff and whole-response signing bytes matching the Rust canonical authority. |
 | [`@formspec-org/integrity-signature-port`](packages/integrity-signature-port) | The signature verifier port and the verification receipt types every adapter returns. |
 | [`@formspec-org/integrity-cose`](packages/integrity-cose) | COSE_Sign1 byte helpers and method dispatch enforcement. |
 | [`@formspec-org/integrity-signature-adapter-webcrypto`](packages/integrity-signature-adapter-webcrypto) | The port implemented on WebCrypto, for browsers and Node. |

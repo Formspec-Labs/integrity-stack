@@ -1,0 +1,91 @@
+{
+  "profile": "formspec-response-signing-v1",
+  "domain": "formspec.response.signed-payload.v1",
+  "oracle": "rfc8785.py 0.1.4 + Python hashlib",
+  "notes": "Synthetic signature members prove omission only; no signing or verification claim.",
+  "valid": [
+    {
+      "name": "existing-rust-vector",
+      "inputJson": [
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"resp-001\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"authoredSignatures\": [{\"signatureId\": \"sig-001\"}]}"
+      ],
+      "canonicalJson": "{\"$formspecResponse\":\"1.0\",\"authored\":\"2026-05-08T12:00:00Z\",\"data\":{\"a\":2,\"z\":1},\"definitionUrl\":\"https://example.org/forms/test\",\"definitionVersion\":\"1.0.0\",\"id\":\"resp-001\",\"status\":\"completed\"}",
+      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2224666f726d73706563526573706f6e7365223a22312e30222c22617574686f726564223a22323032362d30352d30385431323a30303a30305a222c2264617461223a7b2261223a322c227a223a317d2c22646566696e6974696f6e55726c223a2268747470733a2f2f6578616d706c652e6f72672f666f726d732f74657374222c22646566696e6974696f6e56657273696f6e223a22312e302e30222c226964223a22726573702d303031222c22737461747573223a22636f6d706c65746564227d",
+      "sha256": "eace0b826e434d2d35d0a0c0d444c76b3b1036c2623116a4d3cc4ca8abb25045"
+    },
+    {
+      "name": "retained-members-and-cosignature-stability",
+      "inputJson": [
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"signing-vector-002\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"__proto__\": {\"retain\": true}, \"constructor\": \"retain\", \"toJSON\": \"ordinary JSON\"}",
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"signing-vector-002\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"authoredSignatures\": null, \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"__proto__\": {\"retain\": true}, \"constructor\": \"retain\", \"toJSON\": \"ordinary JSON\"}",
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"signing-vector-002\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"authoredSignatures\": {}, \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"__proto__\": {\"retain\": true}, \"constructor\": \"retain\", \"toJSON\": \"ordinary JSON\"}",
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"signing-vector-002\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"authoredSignatures\": [], \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"__proto__\": {\"retain\": true}, \"constructor\": \"retain\", \"toJSON\": \"ordinary JSON\"}",
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"signing-vector-002\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"authoredSignatures\": [{\"signatureId\": \"one\"}], \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"__proto__\": {\"retain\": true}, \"constructor\": \"retain\", \"toJSON\": \"ordinary JSON\"}",
+        "{\"$formspecResponse\": \"1.0\", \"id\": \"signing-vector-002\", \"definitionUrl\": \"https://example.org/forms/test\", \"definitionVersion\": \"1.0.0\", \"status\": \"completed\", \"data\": {\"z\": 1, \"a\": 2}, \"authored\": \"2026-05-08T12:00:00Z\", \"authoredSignatures\": [{\"signatureId\": \"one\"}, {\"signatureId\": \"two\"}], \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"__proto__\": {\"retain\": true}, \"constructor\": \"retain\", \"toJSON\": \"ordinary JSON\"}"
+      ],
+      "canonicalJson": "{\"$formspecResponse\":\"1.0\",\"__proto__\":{\"retain\":true},\"authored\":\"2026-05-08T12:00:00Z\",\"constructor\":\"retain\",\"data\":{\"a\":2,\"z\":1},\"definitionUrl\":\"https://example.org/forms/test\",\"definitionVersion\":\"1.0.0\",\"displayedIssuer\":{\"url\":\"urn:issuer:test\",\"version\":\"1.0.0\"},\"displayedLocale\":{\"locale\":\"es-US\",\"version\":\"0.1.0\"},\"extensions\":{\"authoredSignatures\":[\"nested and signed\"],\"😀\":\"astral\",\"\":\"private\"},\"id\":\"signing-vector-002\",\"metadata\":{\"provenance\":{\"income\":{\"class\":\"user-input\"}}},\"status\":\"completed\",\"toJSON\":\"ordinary JSON\"}",
+      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2224666f726d73706563526573706f6e7365223a22312e30222c225f5f70726f746f5f5f223a7b2272657461696e223a747275657d2c22617574686f726564223a22323032362d30352d30385431323a30303a30305a222c22636f6e7374727563746f72223a2272657461696e222c2264617461223a7b2261223a322c227a223a317d2c22646566696e6974696f6e55726c223a2268747470733a2f2f6578616d706c652e6f72672f666f726d732f74657374222c22646566696e6974696f6e56657273696f6e223a22312e302e30222c22646973706c61796564497373756572223a7b2275726c223a2275726e3a6973737565723a74657374222c2276657273696f6e223a22312e302e30227d2c22646973706c617965644c6f63616c65223a7b226c6f63616c65223a2265732d5553222c2276657273696f6e223a22302e312e30227d2c22657874656e73696f6e73223a7b22617574686f7265645369676e617475726573223a5b226e657374656420616e64207369676e6564225d2c22f09f9880223a2261737472616c222c22ee8080223a2270726976617465227d2c226964223a227369676e696e672d766563746f722d303032222c226d65746164617461223a7b2270726f76656e616e6365223a7b22696e636f6d65223a7b22636c617373223a22757365722d696e707574227d7d7d2c22737461747573223a22636f6d706c65746564222c22746f4a534f4e223a226f7264696e617279204a534f4e227d",
+      "sha256": "14f3cd7c3702cea45d19c5d99e9d0484e30e6f282c9bdc06005aaad31163ba77"
+    },
+    {
+      "name": "reordered-rich-response",
+      "inputJson": [
+        "{\"toJSON\": \"ordinary JSON\", \"constructor\": \"retain\", \"__proto__\": {\"retain\": true}, \"metadata\": {\"provenance\": {\"income\": {\"class\": \"user-input\"}}}, \"extensions\": {\"authoredSignatures\": [\"nested and signed\"], \"😀\": \"astral\", \"\": \"private\"}, \"displayedIssuer\": {\"url\": \"urn:issuer:test\", \"version\": \"1.0.0\"}, \"displayedLocale\": {\"locale\": \"es-US\", \"version\": \"0.1.0\"}, \"authoredSignatures\": [{\"signatureId\": \"sig-001\"}], \"authored\": \"2026-05-08T12:00:00Z\", \"data\": {\"z\": 1, \"a\": 2}, \"status\": \"completed\", \"definitionVersion\": \"1.0.0\", \"definitionUrl\": \"https://example.org/forms/test\", \"id\": \"signing-vector-002\", \"$formspecResponse\": \"1.0\"}"
+      ],
+      "canonicalJson": "{\"$formspecResponse\":\"1.0\",\"__proto__\":{\"retain\":true},\"authored\":\"2026-05-08T12:00:00Z\",\"constructor\":\"retain\",\"data\":{\"a\":2,\"z\":1},\"definitionUrl\":\"https://example.org/forms/test\",\"definitionVersion\":\"1.0.0\",\"displayedIssuer\":{\"url\":\"urn:issuer:test\",\"version\":\"1.0.0\"},\"displayedLocale\":{\"locale\":\"es-US\",\"version\":\"0.1.0\"},\"extensions\":{\"authoredSignatures\":[\"nested and signed\"],\"😀\":\"astral\",\"\":\"private\"},\"id\":\"signing-vector-002\",\"metadata\":{\"provenance\":{\"income\":{\"class\":\"user-input\"}}},\"status\":\"completed\",\"toJSON\":\"ordinary JSON\"}",
+      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2224666f726d73706563526573706f6e7365223a22312e30222c225f5f70726f746f5f5f223a7b2272657461696e223a747275657d2c22617574686f726564223a22323032362d30352d30385431323a30303a30305a222c22636f6e7374727563746f72223a2272657461696e222c2264617461223a7b2261223a322c227a223a317d2c22646566696e6974696f6e55726c223a2268747470733a2f2f6578616d706c652e6f72672f666f726d732f74657374222c22646566696e6974696f6e56657273696f6e223a22312e302e30222c22646973706c61796564497373756572223a7b2275726c223a2275726e3a6973737565723a74657374222c2276657273696f6e223a22312e302e30227d2c22646973706c617965644c6f63616c65223a7b226c6f63616c65223a2265732d5553222c2276657273696f6e223a22302e312e30227d2c22657874656e73696f6e73223a7b22617574686f7265645369676e617475726573223a5b226e657374656420616e64207369676e6564225d2c22f09f9880223a2261737472616c222c22ee8080223a2270726976617465227d2c226964223a227369676e696e672d766563746f722d303032222c226d65746164617461223a7b2270726f76656e616e6365223a7b22696e636f6d65223a7b22636c617373223a22757365722d696e707574227d7d7d2c22737461747573223a22636f6d706c65746564222c22746f4a534f4e223a226f7264696e617279204a534f4e227d",
+      "sha256": "14f3cd7c3702cea45d19c5d99e9d0484e30e6f282c9bdc06005aaad31163ba77"
+    },
+    {
+      "name": "unicode-and-numbers",
+      "inputJson": [
+        "{\"data\":{\"\\ue000\":\"private-use\",\"😀\":\"astral\",\"text\":\"€\\n\\u000f/é\",\"minusZero\":-0,\"numbers\":[333333333.33333329,1E30,4.50,2e-3,1e-27,1e-7,1e20,1e21]}}"
+      ],
+      "canonicalJson": "{\"data\":{\"minusZero\":0,\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27,1e-7,100000000000000000000,1e+21],\"text\":\"€\\n\\u000f/é\",\"😀\":\"astral\",\"\":\"private-use\"}}",
+      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2264617461223a7b226d696e75735a65726f223a302c226e756d62657273223a5b3333333333333333332e333333333333332c31652b33302c342e352c302e3030322c31652d32372c31652d372c3130303030303030303030303030303030303030302c31652b32315d2c2274657874223a22e282ac5c6e5c75303030662fc3a9222c22f09f9880223a2261737472616c222c22ee8080223a22707269766174652d757365227d7d",
+      "sha256": "df4c07e6ba4c61431137cb261286001c40f4a2d9601f6de89a4d749172d7c8f5"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "null-root",
+      "inputJson": "null"
+    },
+    {
+      "name": "array-root",
+      "inputJson": "[]"
+    },
+    {
+      "name": "scalar-root",
+      "inputJson": "\"response\""
+    },
+    {
+      "name": "boolean-root",
+      "inputJson": "true"
+    },
+    {
+      "name": "invalid-json",
+      "inputJson": "{\"data\":}"
+    },
+    {
+      "name": "lone-high-surrogate",
+      "inputJson": "{\"data\":\"\\ud800\"}"
+    },
+    {
+      "name": "lone-low-surrogate",
+      "inputJson": "{\"data\":\"\\udfff\"}"
+    },
+    {
+      "name": "surrogate-object-key",
+      "inputJson": "{\"\\ud800\":\"data\"}"
+    },
+    {
+      "name": "surrogate-in-omitted-signature",
+      "inputJson": "{\"authoredSignatures\":[{\"value\":\"\\ud800\"}]}"
+    },
+    {
+      "name": "surrogate-key-in-omitted-signature",
+      "inputJson": "{\"authoredSignatures\":{\"\\udfff\":true}}"
+    }
+  ]
+}
