@@ -15,8 +15,7 @@ const SIGNING_DOMAIN = 'formspec.response.signed-payload.v1';
  * maintained canonicalizer also rejects invalid Unicode strings and keys.
  */
 export function canonicalResponseHandoffBytes(response: unknown): Uint8Array<ArrayBuffer> {
-  assertResponse(response);
-  return framedBytes(HANDOFF_DOMAIN, response);
+  return framedBytes(HANDOFF_DOMAIN, responseSnapshot(response));
 }
 
 /**
@@ -30,19 +29,18 @@ export function canonicalResponseHandoffBytes(response: unknown): Uint8Array<Arr
  * @throws TypeError for a non-object root, non-JSON runtime data or malformed Unicode.
  */
 export function canonicalResponseSignedPayloadBytes(response: unknown): Uint8Array<ArrayBuffer> {
-  assertResponse(response);
-  const payload = Object.create(null);
-  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(response))) {
-    if (key !== 'authoredSignatures') Object.defineProperty(payload, key, descriptor);
-  }
+  const payload = responseSnapshot(response);
+  delete payload.authoredSignatures;
   return framedBytes(SIGNING_DOMAIN, payload);
 }
 
-function assertResponse(response: unknown): asserts response is Record<string, unknown> {
+type JsonValue = null | string | boolean | number | JsonValue[] | { [key: string]: JsonValue };
+
+function responseSnapshot(response: unknown): Record<string, JsonValue> {
   if (response === null || typeof response !== 'object' || Array.isArray(response)) {
     throw new TypeError('response must be a JSON object');
   }
-  assertJsonValue(response, new Set());
+  return jsonSnapshot(response, new Set()) as Record<string, JsonValue>;
 }
 
 function framedBytes(domain: string, response: unknown): Uint8Array<ArrayBuffer> {
@@ -52,14 +50,15 @@ function framedBytes(domain: string, response: unknown): Uint8Array<ArrayBuffer>
 }
 
 // Admission checking only: serialization, ordering, and number formatting all
-// belong to the maintained RFC 8785 implementation. Never drop input values.
-function assertJsonValue(value: unknown, ancestors: Set<object>): void {
+// belong to the maintained RFC 8785 implementation. Serialize only admitted
+// descriptor values, so runtime Proxy reads cannot replace the checked data.
+function jsonSnapshot(value: unknown, ancestors: Set<object>): JsonValue {
   if (typeof value === 'string') {
     if (!value.isWellFormed()) throw new TypeError('response contains invalid Unicode');
-    return;
+    return value;
   }
-  if (value === null || typeof value === 'boolean') return;
-  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'object') {
     throw new TypeError('response contains a non-JSON value');
   }
@@ -82,19 +81,24 @@ function assertJsonValue(value: unknown, ancestors: Set<object>): void {
   if (Object.getOwnPropertySymbols(value).length > 0) {
     throw new TypeError('response contains symbol properties');
   }
-  if (array && Object.keys(descriptors).length !== value.length + 1) {
+  const length = array ? descriptors.length?.value : 0;
+  if (array && (!Number.isInteger(length) || length < 0 || Object.keys(descriptors).length !== length + 1)) {
     throw new TypeError('response contains a sparse array or extra array properties');
   }
+  const snapshot: Record<string, JsonValue> = array ? Object.setPrototypeOf(new Array(length), null) : Object.create(null);
   for (const [key, descriptor] of Object.entries(descriptors)) {
     if (!key.isWellFormed()) throw new TypeError('response contains invalid Unicode');
     if (array && key === 'length') continue;
     if (!descriptor.enumerable || !('value' in descriptor)) {
       throw new TypeError('response contains an accessor or non-JSON property');
     }
-    if (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length)) {
+    if (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= length)) {
       throw new TypeError('response contains extra array properties');
     }
-    assertJsonValue(descriptor.value, ancestors);
+    Object.defineProperty(snapshot, key, {
+      value: jsonSnapshot(descriptor.value, ancestors), enumerable: true, configurable: true, writable: true,
+    });
   }
   ancestors.delete(value);
+  return snapshot;
 }

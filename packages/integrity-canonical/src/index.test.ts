@@ -108,7 +108,24 @@ for (const produceBytes of [canonicalResponseHandoffBytes, canonicalResponseSign
       Object.assign(array, { extra: 2 });
       expect(() => produceBytes({ data: array })).toThrow(TypeError);
     });
-    it('does not depend on cryptographic availability', () => {
+    it('serializes descriptor-admitted snapshots without Proxy value or toJSON reads', () => {
+    let reads = 0;
+    const nested = new Proxy({ value: 1 }, {
+      get(_target, key) { reads++; return key === 'toJSON' ? () => ({ replaced: true }) : undefined; },
+    });
+    const root = new Proxy({ data: nested }, {
+      get(_target, key) { reads++; return key === 'toJSON' ? () => ({ replaced: true }) : undefined; },
+    });
+    expect(produceBytes(root)).toEqual(produceBytes({ data: { value: 1 } }));
+    expect(reads).toBe(0);
+  });
+  it('uses admitted array length and elements rather than Proxy value reads', () => {
+    let reads = 0;
+    const array = new Proxy([1, 2], { get() { reads++; return 99; } });
+    expect(produceBytes({ data: array })).toEqual(produceBytes({ data: [1, 2] }));
+    expect(reads).toBe(0);
+  });
+  it('does not depend on cryptographic availability', () => {
       const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
       Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true });
       try {
