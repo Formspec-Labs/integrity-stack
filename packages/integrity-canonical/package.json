@@ -1,0 +1,30 @@
+{
+  "name": "@formspec-org/integrity-canonical",
+  "version": "0.1.0",
+  "description": "Canonical full-Response intake handoff bytes matching integrity-canonical Rust",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Formspec-Labs/integrity-stack.git",
+    "directory": "packages/integrity-canonical"
+  },
+  "engines": { "node": ">=22" },
+  "publishConfig": { "access": "public" },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "sideEffects": false,
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "canonicalize": "5.1.0" },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
