@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use integrity_bundle::{BundleEntry, read_stored_zip};
+use integrity_cbor::sha256_bytes;
 use integrity_verify::trellis::Severity;
 use integrity_verify::{
     BundleEntryView, ProfileRegistry, SubstrateTier, VerificationReport, VerifyBundleInput,
@@ -54,6 +55,7 @@ usage: integrity-verify <command>
 commands:
   verify <bundle.zip> [--format text|json|both]
   verify-export <bundle.zip> [--format text|json|both]
+    [--trusted-signing-key-registry-sha256 <64 lowercase hex>]
 
 `verify` enumerates ZIP entries, parses each `.cbor` entry as a COSE_Sign1
 envelope, runs the universal verifier (envelope shape, signature when public
@@ -62,7 +64,10 @@ VerificationReport including substrate_tier. It does not register permissive
 semantic profile shims; use `verify-export` for WOS/Trellis export semantics.
 
 `verify-export` verifies a Trellis/WOS export ZIP through
-trellis_verify_wos::verify_export_zip.
+trellis_verify_wos::verify_export_zip. An optional independently selected
+registry digest must match the exact embedded registry bytes before verification.
+A matching snapshot does not establish agency identity, freshness or disclosure
+permission. Without a pin, registry selection is reported as not_requested.
 
 Exit code 0 on a verified report; exit code 1 on any failure.";
 
@@ -102,6 +107,7 @@ pub fn run(
 struct VerifyExportArgs {
     bundle_path: PathBuf,
     format: OutputFormat,
+    trusted_registry_sha256: Option<String>,
 }
 
 fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
@@ -144,6 +150,7 @@ fn parse_verify_args(rest: &[String]) -> Result<VerifyArgs, String> {
 fn parse_verify_export_args(rest: &[String]) -> Result<VerifyExportArgs, String> {
     let mut bundle_path: Option<PathBuf> = None;
     let mut format = OutputFormat::Both;
+    let mut trusted_registry_sha256 = None;
 
     let mut index = 0;
     while index < rest.len() {
@@ -154,6 +161,25 @@ fn parse_verify_export_args(rest: &[String]) -> Result<VerifyExportArgs, String>
                     .get(index + 1)
                     .ok_or_else(|| "--format requires a value".to_string())?;
                 format = OutputFormat::parse(value)?;
+                index += 2;
+            }
+            "--trusted-signing-key-registry-sha256" => {
+                if trusted_registry_sha256.is_some() {
+                    return Err("duplicate --trusted-signing-key-registry-sha256".into());
+                }
+                let value = rest.get(index + 1).ok_or_else(|| {
+                    "--trusted-signing-key-registry-sha256 requires a value".to_string()
+                })?;
+                if value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(
+                        "registry SHA-256 must contain exactly 64 lowercase hex characters".into(),
+                    );
+                }
+                trusted_registry_sha256 = Some(value.clone());
                 index += 2;
             }
             "--help" | "-h" => {
@@ -175,6 +201,7 @@ fn parse_verify_export_args(rest: &[String]) -> Result<VerifyExportArgs, String>
     Ok(VerifyExportArgs {
         bundle_path,
         format,
+        trusted_registry_sha256,
     })
 }
 
@@ -270,9 +297,11 @@ fn verify_export_command(args: &VerifyExportArgs, stdout: &mut dyn Write) -> Res
             args.bundle_path.display()
         )
     })?;
+    // Select the raw registry from the same owned bytes that reach verification.
+    check_registry_pin(&zip_bytes, args.trusted_registry_sha256.as_deref())?;
     let report = trellis_verify_wos::verify_export_zip(&zip_bytes);
-    let text_section = render_export_text(&report);
-    let json_section = render_export_json(&report)?;
+    let text_section = render_export_text(&report, args.trusted_registry_sha256.as_deref());
+    let json_section = render_export_json(&report, args.trusted_registry_sha256.as_deref())?;
 
     match args.format {
         OutputFormat::Text => stdout
@@ -306,6 +335,47 @@ fn verify_export_command(args: &VerifyExportArgs, stdout: &mut dyn Write) -> Res
         ));
     }
     Ok(())
+}
+
+/// Requires the exact independently selected registry snapshot when supplied.
+fn check_registry_pin(zip_bytes: &[u8], expected: Option<&str>) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let entries = read_stored_zip(zip_bytes)
+        .map_err(|error| format!("registry pin: failed to parse ZIP: {error}"))?;
+    // Core export parsing removes exactly one root component. Count before
+    // collecting into a map so duplicate relative names cannot overwrite.
+    let mut registries = entries.iter().filter(|entry| {
+        entry
+            .path()
+            .split_once('/')
+            .is_some_and(|(_, relative)| relative == "030-signing-key-registry.cbor")
+    });
+    let registry = registries
+        .next()
+        .ok_or_else(|| "registry pin: missing signing-key registry".to_string())?;
+    if registries.next().is_some() {
+        return Err("registry pin: ambiguous signing-key registry members".into());
+    }
+    let observed: String = sha256_bytes(registry.bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if observed != expected {
+        return Err(format!(
+            "registry pin mismatch: expected={expected} observed={observed}"
+        ));
+    }
+    Ok(())
+}
+
+fn registry_pin_status(expected: Option<&str>) -> &'static str {
+    if expected.is_some() {
+        "matched"
+    } else {
+        "not_requested"
+    }
 }
 
 fn stdout_err(error: std::io::Error) -> String {
@@ -491,9 +561,18 @@ fn render_json(report: &VerificationReport) -> Result<String, String> {
         .map_err(|error| format!("failed to serialize report JSON: {error}"))
 }
 
-fn render_export_text(report: &WosVerificationReport) -> String {
+fn render_export_text(report: &WosVerificationReport, registry_pin: Option<&str>) -> String {
     let mut out = String::new();
     out.push_str("integrity-verify export report\n");
+    out.push_str(&format!(
+        "  signing_key_registry_pin: {}\n",
+        registry_pin_status(registry_pin)
+    ));
+    if let Some(digest) = registry_pin {
+        out.push_str(&format!(
+            "  expected_registry_sha256: {digest}\n  observed_registry_sha256: {digest}\n"
+        ));
+    }
     out.push_str(&format!(
         "  structure_verified: {}\n",
         report.trellis.structure_verified
@@ -521,8 +600,19 @@ fn render_export_text(report: &WosVerificationReport) -> String {
     out
 }
 
-fn render_export_json(report: &WosVerificationReport) -> Result<String, String> {
+fn render_export_json(
+    report: &WosVerificationReport,
+    registry_pin: Option<&str>,
+) -> Result<String, String> {
     let mut root = serde_json::Map::new();
+    root.insert(
+        "signing_key_registry_pin".into(),
+        serde_json::json!({
+            "status": registry_pin_status(registry_pin),
+            "expected_sha256": registry_pin,
+            "observed_sha256": registry_pin,
+        }),
+    );
     root.insert(
         "structure_verified".into(),
         serde_json::Value::Bool(report.trellis.structure_verified),
@@ -697,6 +787,165 @@ mod tests {
                 .unwrap();
         assert_eq!(args.format, OutputFormat::Json);
         assert_eq!(args.bundle_path.to_str().unwrap(), "/tmp/bundle.zip");
+    }
+
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    fn registry_zip(paths: &[&str]) -> Vec<u8> {
+        let mut bundle = Bundle::new();
+        for path in paths {
+            bundle.add_entry(BundleEntry::new(*path, b"abc".to_vec()));
+        }
+        bundle.to_zip_bytes().unwrap()
+    }
+
+    #[test]
+    fn registry_pin_args_refuse_invalid_or_duplicate_selection() {
+        for digest in ["", "abc", &"A".repeat(64), &"g".repeat(64), &"0".repeat(65)] {
+            assert!(
+                parse_verify_export_args(&[
+                    "bundle.zip".into(),
+                    "--trusted-signing-key-registry-sha256".into(),
+                    digest.into(),
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            parse_verify_export_args(&[
+                "bundle.zip".into(),
+                "--trusted-signing-key-registry-sha256".into(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_verify_export_args(&[
+                "bundle.zip".into(),
+                "--trusted-signing-key-registry-sha256".into(),
+                ABC_SHA256.into(),
+                "--trusted-signing-key-registry-sha256".into(),
+                ABC_SHA256.into(),
+            ])
+            .is_err()
+        );
+        let parsed = parse_verify_export_args(&[
+            "bundle.zip".into(),
+            "--trusted-signing-key-registry-sha256".into(),
+            ABC_SHA256.into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.trusted_registry_sha256.as_deref(), Some(ABC_SHA256));
+    }
+
+    #[test]
+    fn registry_pin_matches_exact_raw_member_and_refuses_other_snapshot() {
+        let zip = registry_zip(&["root/030-signing-key-registry.cbor"]);
+        assert!(check_registry_pin(&zip, Some(ABC_SHA256)).is_ok());
+        let error = check_registry_pin(&zip, Some(&"0".repeat(64))).unwrap_err();
+        assert!(error.contains("registry pin mismatch"));
+        assert!(error.contains(ABC_SHA256));
+        assert!(check_registry_pin(&zip, None).is_ok());
+        assert_eq!(registry_pin_status(None), "not_requested");
+    }
+
+    #[test]
+    fn registry_pin_refuses_missing_ambiguous_nested_and_malformed_members() {
+        for paths in [
+            vec!["root/readme.txt"],
+            vec!["root/nested/030-signing-key-registry.cbor"],
+            vec!["030-signing-key-registry.cbor"],
+        ] {
+            assert!(check_registry_pin(&registry_zip(&paths), Some(ABC_SHA256)).is_err());
+        }
+        let mut zip = registry_zip(&[
+            "roota/030-signing-key-registry.cbor",
+            "rootb/030-signing-key-registry.cbor",
+        ]);
+        assert!(
+            check_registry_pin(&zip, Some(ABC_SHA256))
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        // Same-path duplicates cannot be constructed by Bundle. Change both ZIP
+        // path copies without touching content/CRC to exercise reader preservation.
+        for index in 0..zip.len() - 5 {
+            if &zip[index..index + 5] == b"rootb" {
+                zip[index + 4] = b'a';
+            }
+        }
+        assert!(
+            check_registry_pin(&zip, Some(ABC_SHA256))
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(check_registry_pin(b"not a ZIP", Some(ABC_SHA256)).is_err());
+    }
+
+    #[test]
+    fn matching_registry_does_not_bypass_native_export_verification() {
+        let path = write_test_bundle(
+            "pin-without-proof",
+            &[("root/030-signing-key-registry.cbor", b"abc".to_vec())],
+        );
+        let mut stdout = Vec::new();
+        let result = run(
+            &[
+                "integrity-verify".into(),
+                "verify-export".into(),
+                path.display().to_string(),
+                "--format".into(),
+                "json".into(),
+                "--trusted-signing-key-registry-sha256".into(),
+                ABC_SHA256.into(),
+            ],
+            &mut stdout,
+            &mut Vec::new(),
+            &ProfileRegistry::new,
+        );
+        let _ = std::fs::remove_file(path);
+        assert!(result.is_err());
+        let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["verified"], false);
+        assert_eq!(report["signing_key_registry_pin"]["status"], "matched");
+    }
+
+    #[test]
+    fn matching_registry_does_not_bypass_manifest_signature_failure() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../trellis/fixtures/vectors/export/001-two-event-chain/expected-export.zip",
+        );
+        let entries = read_stored_zip(&std::fs::read(fixture).unwrap()).unwrap();
+        let mut bundle = Bundle::new();
+        for entry in entries {
+            let mut bytes = entry.bytes().to_vec();
+            if entry.path().ends_with("/000-manifest.cbor") {
+                *bytes.last_mut().unwrap() ^= 1;
+            }
+            bundle.add_entry(BundleEntry::new(entry.path(), bytes));
+        }
+        let path = test_bundle_path("pin-invalid-manifest");
+        std::fs::write(&path, bundle.to_zip_bytes().unwrap()).unwrap();
+        let mut stdout = Vec::new();
+        let result = run(
+            &[
+                "integrity-verify".into(),
+                "verify-export".into(),
+                path.display().to_string(),
+                "--format".into(),
+                "json".into(),
+                "--trusted-signing-key-registry-sha256".into(),
+                "5fb219dd247fab84a0c747ca1cfe1ac1431f226d52ca0f4eab80c92df1dc1ada".into(),
+            ],
+            &mut stdout,
+            &mut Vec::new(),
+            &ProfileRegistry::new,
+        );
+        let _ = std::fs::remove_file(path);
+        assert!(result.is_err());
+        let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["verified"], false);
+        assert_eq!(report["signing_key_registry_pin"]["status"], "matched");
+        assert_eq!(report["integrity_verified"], false);
     }
 
     #[test]

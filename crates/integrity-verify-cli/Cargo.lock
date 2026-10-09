@@ -335,6 +335,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "integrity-bundle",
+ "integrity-cbor",
  "integrity-cose",
  "integrity-verify",
  "serde_json",
@@ -546,6 +547,7 @@ dependencies = [
 name = "stack-common-typeid"
 version = "0.1.0"
 dependencies = [
+ "rand_core",
  "uuid",
 ]
 

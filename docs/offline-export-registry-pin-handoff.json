@@ -1,0 +1,41 @@
+{
+  "status": "private implementation; static reviewed; native execution pending coordination",
+  "baseCommit": "d2dd4827cd294aaecc470e6a49dd8954a48880cf",
+  "files": {
+    "crates/integrity-verify-cli/Cargo.toml": "a6c417ccf3dbe5c0de2689f7fc0722dc17384ba4d216a7811b882125f39e4b3a",
+    "crates/integrity-verify-cli/Cargo.lock": "c3549e67ad697f4cd03f9752a53d308b88ec469b5abf8c60eebd85d880ecec66",
+    "crates/integrity-verify-cli/src/cli.rs": "ac83297d007c7dec421a72065d9ef7796dbd56a11d554ca91225d405f7402eb9",
+    "crates/integrity-verify-cli/tests/verify_bundle.rs": "addf2343978168bb92439332db0af34ae0dbcfb19de6908580a854aa19bc2ea8",
+    "docs/offline-export-registry-pin.md": "1ee7d1511a3b4d8cb2109a92df621d78c99ce575db6b2f87d450107d945548c2",
+    "docs/offline-export-trust-before-code.md": "2a7f71b739c527f9976016ad99cca22562303526d9fa75e870b5f9976a3c523f",
+    "docs/offline-export-trust-before-architecture.md": "673d9f6e2cd809860cd0c3fb4b68c3ee556d8085014c6a4401cb01371a132a3e",
+    "docs/offline-export-trust-after-code.md": "806d903baabff6d226812de52a0270ea9902746419c0bb035482cc297d29e7fe",
+    "docs/offline-export-trust-after-architecture.md": "0aab473418ceb267712bdb88202b588af70962b3236012ddd60f4ca9417ea4f2"
+  },
+  "staticChecks": {
+    "rustfmt": "PASS",
+    "gitDiffCheck": "PASS"
+  },
+  "nativeBuildExecuted": false,
+  "testsExecuted": false,
+  "actualArchiveVerified": false,
+  "sharedAdoption": false,
+  "nextNativeTest": [
+    "cargo",
+    "test",
+    "--offline",
+    "--locked",
+    "-j",
+    "1",
+    "--manifest-path",
+    "integrity-stack/crates/integrity-verify-cli/Cargo.toml"
+  ],
+  "nextOfflineCommand": "integrity-verify verify-export <actual.zip> --format json --trusted-signing-key-registry-sha256 <independently-selected-030-snapshot-sha256>",
+  "trustScope": "exact independently selected registry snapshot only; no agency identity, single exporter authorization, freshness, disclosure permission or full history completeness",
+  "dependencies": [
+    "coordinated native build/test window",
+    "actual authorized native D1 history and original evidence admitted into Trellis custody",
+    "owner-qualified archive writer evidence-member composition and output grants",
+    "independent original registry provenance retained before offline verification"
+  ]
+}
