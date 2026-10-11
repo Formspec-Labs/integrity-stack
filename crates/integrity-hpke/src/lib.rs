@@ -42,6 +42,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod external_attachment;
+
 use hpke::{
     Deserializable, OpModeR, Serializable, aead::ChaCha20Poly1305 as HpkeChaCha20Poly1305,
     kdf::HkdfSha256, kem::X25519HkdfSha256, setup_receiver,
@@ -187,7 +189,8 @@ pub fn wrap_dek(
             HpkeError::InvalidInput("recipient_pubkey is not a 32-byte X25519 public key")
         })?;
 
-    let mut buffer = dek_plaintext.to_vec();
+    // Erase the copied plaintext on entropy/HPKE errors as well as success.
+    let mut buffer = zeroize::Zeroizing::new(dek_plaintext.to_vec());
     let mut csprng = SecureRandomRng::new(rng);
     let (encapped_key, tag) = single_shot_seal_in_place_detached::<
         HpkeChaCha20Poly1305,
@@ -213,7 +216,7 @@ pub fn wrap_dek(
 
     Ok(WrapResult {
         ephemeral_pubkey,
-        ciphertext: buffer,
+        ciphertext: buffer.to_vec(),
         aead_tag,
     })
 }
