@@ -1012,7 +1012,7 @@ pub(crate) fn verify_export_zip_with_record_validator(
         &report.user_content_attestations,
         &report.interop_sidecars,
     );
-    report.readability_verified = true;
+    // Preserve the event pass's protected-original readability result.
     report
 }
 

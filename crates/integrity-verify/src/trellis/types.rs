@@ -177,6 +177,8 @@ pub struct InteropSidecarVerificationEntry {
 pub struct VerificationReport {
     pub structure_verified: bool,
     pub integrity_verified: bool,
+    /// False when selected protected originals have not been opened and checked.
+    /// Ciphertext/signature integrity does not establish recipient permission.
     pub readability_verified: bool,
     pub event_failures: Vec<VerificationFailure>,
     pub checkpoint_failures: Vec<VerificationFailure>,
@@ -578,6 +580,8 @@ pub(crate) struct BoundRegistry {
 pub(crate) enum PayloadRef {
     Inline(Vec<u8>),
     External,
+    /// Explicitly selected ciphertext; generic verification cannot release original bytes.
+    ProtectedExternal,
 }
 
 #[derive(Clone, Debug)]

@@ -18,6 +18,7 @@ integrity-canonical = { path = "../integrity-canonical" }
 integrity-bundle = { path = "../integrity-bundle" }
 integrity-cose = { path = "../integrity-cose" }
 serde_json = "1.0"
+trellis-cddl = { path = "../../../trellis/crates/trellis-cddl" }
 trellis-types = { path = "../../../trellis/crates/trellis-types" }
 
 [dev-dependencies]

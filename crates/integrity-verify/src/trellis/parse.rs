@@ -140,9 +140,25 @@ pub(crate) fn decode_event_details_with_identity_admission(
     let classification = String::from_utf8(classification_bytes)
         .map_err(|_| VerifyError::new("header.classification is not valid UTF-8"))?;
 
+    // Reuse the native profile's structural admission; unknown selections fail
+    // before any payload is offered to a plaintext/domain reader.
+    let profile_selected =
+        map_lookup_optional_map(payload_map, "extensions")?.is_some_and(|extensions| {
+            extensions
+                .iter()
+                .any(|(key, _)| key.as_text() == Some(trellis_cddl::PROFILE_EXTENSION))
+        });
+    let protected_external = if profile_selected {
+        trellis_cddl::parse_external_attachment_profile(payload_bytes)
+            .map_err(|error| VerifyError::new(format!("external attachment profile: {error}")))?
+            .is_some()
+    } else {
+        false
+    };
     let payload_ref_map = map_lookup_map(payload_map, "payload_ref")?;
     let payload_ref = match map_lookup_text(payload_ref_map, "ref_type")?.as_str() {
         "inline" => PayloadRef::Inline(map_lookup_bytes(payload_ref_map, "ciphertext")?),
+        "external" if protected_external => PayloadRef::ProtectedExternal,
         "external" => PayloadRef::External,
         _ => {
             return Err(VerifyError::new(
@@ -1197,6 +1213,7 @@ pub(crate) fn readable_payload_bytes(
     match &details.payload_ref {
         PayloadRef::Inline(bytes) => Some(bytes.clone()),
         PayloadRef::External => payload_blobs.get(&details.content_hash).cloned(),
+        PayloadRef::ProtectedExternal => None,
     }
 }
 

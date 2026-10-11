@@ -233,6 +233,7 @@ fn readable_payload_for_certificate(
 ) -> Option<Vec<u8>> {
     match &target.payload_ref {
         PayloadRef::Inline(bytes) => Some(bytes.clone()),
+        PayloadRef::ProtectedExternal => None,
         PayloadRef::External => {
             payload_blobs.and_then(|blobs| blobs.get(&target.content_hash).cloned())
         }
@@ -409,7 +410,7 @@ pub(crate) fn verify_certificate_attachment_lineage(
     // binding for that id (forward-walk; `prior_binding_hash` chain not
     // material for content-hash recompute — the latest binding IS the bound
     // bytes by definition).
-    let mut binding_by_attachment_id: BTreeMap<String, (AttachmentBindingDetails, [u8; 32])> =
+    let mut binding_by_attachment_id: BTreeMap<String, (AttachmentBindingDetails, bool)> =
         BTreeMap::new();
     for event in events {
         if let Ok(details) = decode_event_details(event)
@@ -417,7 +418,10 @@ pub(crate) fn verify_certificate_attachment_lineage(
         {
             binding_by_attachment_id.insert(
                 binding.attachment_id.clone(),
-                (binding.clone(), details.content_hash),
+                (
+                    binding.clone(),
+                    matches!(details.payload_ref, PayloadRef::ProtectedExternal),
+                ),
             );
         }
     }
@@ -460,7 +464,7 @@ pub(crate) fn verify_certificate_attachment_lineage(
             continue;
         };
 
-        let Some((binding, _binding_payload_hash)) =
+        let Some((binding, protected_original)) =
             binding_by_attachment_id.get(&certificate.presentation_artifact.attachment_id)
         else {
             outcome.attachment_resolved = false;
@@ -473,6 +477,22 @@ pub(crate) fn verify_certificate_attachment_lineage(
             ));
             continue;
         };
+
+        if *protected_original {
+            outcome.attachment_resolved = false;
+            outcome
+                .failures
+                .push("presentation_artifact_attachment_missing".into());
+            report.event_failures.push(VerificationFailure::new(
+                VerificationFailureKind::PresentationArtifactAttachmentMissing,
+                canonical_hash_hex,
+            ));
+            report.warnings.push(format!(
+                "Certificate {}: protected presentation original is unchecked; generic verification cannot resolve it from ciphertext.",
+                outcome.certificate_id,
+            ));
+            continue;
+        }
 
         // Resolve attachment bytes via `payload_blobs` keyed on
         // `binding.payload_content_hash` (the content_hash of the binding

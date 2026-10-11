@@ -497,6 +497,7 @@ pub(crate) fn verify_event_set_with_classes(
     // for events that failed signature verification but remain structurally
     // parseable.
     let mut decoded_per_index: Vec<Option<EventDetails>> = vec![None; events.len()];
+    let mut protected_originals_unchecked = false;
 
     for (index, event) in events.iter().enumerate() {
         let key_entry = match registry.get(&event.kid) {
@@ -596,6 +597,9 @@ pub(crate) fn verify_event_set_with_classes(
             continue;
         };
 
+        protected_originals_unchecked |=
+            matches!(details.payload_ref, PayloadRef::ProtectedExternal);
+
         if key_entry.status == 3 {
             match key_entry.valid_to {
                 Some(valid_to) if details.authored_at > valid_to => {
@@ -664,7 +668,7 @@ pub(crate) fn verify_event_set_with_classes(
                     ));
                 }
             }
-            PayloadRef::External => {
+            PayloadRef::External | PayloadRef::ProtectedExternal => {
                 if let Some(blobs) = payload_blobs
                     && let Some(payload_bytes) = blobs.get(&details.content_hash)
                 {
@@ -911,7 +915,7 @@ pub(crate) fn verify_event_set_with_classes(
         &mut event_failures,
     );
 
-    let trellis = VerificationReport::from_integrity_state(
+    let mut trellis = VerificationReport::from_integrity_state(
         event_failures,
         Vec::new(),
         Vec::new(),
@@ -922,6 +926,10 @@ pub(crate) fn verify_event_set_with_classes(
         correction_preservations,
         Vec::new(),
     );
+    if protected_originals_unchecked {
+        trellis.readability_verified = false;
+        trellis.warnings.push("Supported protected external attachment: ciphertext integrity checks do not establish decrypted original bytes or recipient permission; generic verification does not perform those checks.".to_owned());
+    }
     let domain_findings = record_validator.validate_events(&domain_events);
     VerificationWithDomain {
         trellis,
@@ -935,6 +943,7 @@ fn readable_payload_for_domain(
 ) -> Option<Vec<u8>> {
     match &details.payload_ref {
         PayloadRef::Inline(bytes) => Some(bytes.clone()),
+        PayloadRef::ProtectedExternal => None,
         PayloadRef::External => {
             payload_blobs.and_then(|blobs| blobs.get(&details.content_hash).cloned())
         }
@@ -1010,3 +1019,6 @@ pub(crate) fn attachment_entry_matches_binding(
 
 /// Reserved non-signing class literals from Core §8.7 (ADR 0006).
 const RESERVED_NON_SIGNING_KIND: &[&str] = &["tenant-root", "scope", "subject", "recovery"];
+
+#[cfg(test)]
+mod external_profile_tests;
