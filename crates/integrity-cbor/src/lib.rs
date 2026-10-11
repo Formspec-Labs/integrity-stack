@@ -112,6 +112,33 @@ pub fn encode_cbor_negative_int(n: u64) -> Vec<u8> {
     encode_major_len(1, n)
 }
 
+/// Builds the length-prefixed domain preimage for detached signatures.
+///
+/// Uses two four-byte big-endian lengths: tag byte length, tag bytes,
+/// component byte length, then component bytes. The component must already
+/// have the canonical encoding required by its owning profile. This returns
+/// the raw signature preimage, not its SHA-256 digest.
+///
+/// # Errors
+/// Refuses lengths outside the four-byte wire bound or platform capacity.
+pub fn domain_separated_preimage(tag: &str, component: &[u8]) -> Result<Vec<u8>, CborHelperError> {
+    let tag_len = u32::try_from(tag.len())
+        .map_err(|_| CborHelperError("domain tag exceeds u32 length".into()))?;
+    let component_len = u32::try_from(component.len())
+        .map_err(|_| CborHelperError("domain component exceeds u32 length".into()))?;
+    let capacity = tag
+        .len()
+        .checked_add(component.len())
+        .and_then(|n| n.checked_add(8))
+        .ok_or_else(|| CborHelperError("domain preimage capacity overflow".into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    bytes.extend_from_slice(&tag_len.to_be_bytes());
+    bytes.extend_from_slice(tag.as_bytes());
+    bytes.extend_from_slice(&component_len.to_be_bytes());
+    bytes.extend_from_slice(component);
+    Ok(bytes)
+}
+
 /// Computes a domain-separated SHA-256 digest.
 ///
 /// The preimage is the big-endian byte length of `tag`, followed by the tag
@@ -1022,6 +1049,24 @@ mod tests {
         assert_eq!(
             cbor_value_to_json(&Value::Float(-0.0)),
             Err(JsonCborError::FloatNotDcborCanonical)
+        );
+    }
+}
+
+#[cfg(test)]
+mod domain_preimage_tests {
+    use super::*;
+    #[test]
+    fn raw_signature_preimage_has_exact_framing_and_preserves_hash_compatibility() {
+        let bytes = domain_separated_preimage("é", &[0x83, 0x00, 0x01, 0x02]).unwrap();
+        assert_eq!(bytes, [0, 0, 0, 2, 0xc3, 0xa9, 0, 0, 0, 4, 0x83, 0, 1, 2]);
+        assert_eq!(
+            sha256_bytes(&bytes),
+            domain_separated_sha256("é", &[0x83, 0, 1, 2])
+        );
+        assert_ne!(
+            domain_separated_preimage("a", b"bc").unwrap(),
+            domain_separated_preimage("ab", b"c").unwrap()
         );
     }
 }
