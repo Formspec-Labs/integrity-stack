@@ -122,6 +122,9 @@ const ERASURE_EVIDENCE_EXPORT_EXTENSION: &str = "trellis.export.erasure-evidence
 /// `CertificateOfCompletionPayload` in ADR 0007 §"Wire shape".
 const CERTIFICATE_EVENT_EXTENSION: &str = "trellis.certificate-of-completion.v1";
 
+/// Completion v2 binds each signer row to its indexed response digest.
+const CERTIFICATE_V2_EVENT_EXTENSION: &str = "trellis.certificate-of-completion.v2";
+
 /// ADR 0007 §"Export manifest catalog" — optional manifest extension binding
 /// `065-certificates-of-completion.cbor`.
 const CERTIFICATE_EXPORT_EXTENSION: &str = "trellis.export.certificates-of-completion.v1";
@@ -1031,3 +1034,6 @@ mod external_profile_tests;
 
 #[cfg(test)]
 mod certificate_authority_tests;
+
+#[cfg(test)]
+mod certificate_v2_tests;

@@ -126,7 +126,7 @@ pub enum CertificateAttestationAuthorityStatus {
 pub struct TrustedCertificateAuthority {
     pub public_key: [u8; 32],
     pub authority_class: String,
-    /// Must equal `trellis.certificate-of-completion.v1` for this check.
+    /// Must equal the exact registered certificate event version being checked.
     pub allowed_purpose: String,
     /// Inclusive first permitted completed_at.
     pub valid_from: TrellisTimestamp,
@@ -700,6 +700,9 @@ pub(crate) struct ErasureEvidenceDetails {
 /// and signature checks run at certificate finalization.
 #[derive(Clone, Debug)]
 pub(crate) struct CertificateDetails {
+    pub(crate) version: CertificateVersion,
+    /// Canonical extension bytes for complete v2 certificate ID collision checks.
+    pub(crate) canonical_payload: Vec<u8>,
     pub(crate) operator_attestations: Vec<CertificateOperatorAttestation>,
     pub(crate) certificate_id: String,
     /// Reserved for §6.4 operator obligations; Phase-1 verifier captures the
@@ -717,6 +720,22 @@ pub(crate) struct CertificateDetails {
     pub(crate) workflow_ref: Option<String>,
     /// Shape admission remains separate from explicitly selected operator trust.
     pub(crate) attestation_signatures_well_formed: bool,
+}
+
+/// Registered completion versions keep their distinct verification semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CertificateVersion {
+    V1,
+    V2,
+}
+
+impl CertificateVersion {
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            Self::V1 => super::CERTIFICATE_EVENT_EXTENSION,
+            Self::V2 => super::CERTIFICATE_V2_EVENT_EXTENSION,
+        }
+    }
 }
 
 /// Decoded `PresentationArtifact` map (ADR 0007 §"Wire shape").
@@ -821,6 +840,8 @@ pub(crate) struct UserContentAttestationDetails {
 /// Decoded `SignerDisplayEntry` (ADR 0007 §"Wire shape").
 #[derive(Clone, Debug)]
 pub(crate) struct SignerDisplayDetails {
+    /// Mandatory bstr32 in v2; v1 does not interpret this signer-row field.
+    pub(crate) response_ref: Option<[u8; 32]>,
     #[allow(dead_code)]
     pub(crate) principal_ref: String,
     /// Operator-rendered display name; not strict-compared per ADR 0007

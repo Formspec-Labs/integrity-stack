@@ -10,7 +10,7 @@ use trellis_types::{
 
 use super::{
     ATTACHMENT_EVENT_EXTENSION, ATTACHMENT_EXPORT_EXTENSION, CERTIFICATE_EVENT_EXTENSION,
-    CERTIFICATE_EXPORT_EXTENSION, ERASURE_EVIDENCE_EVENT_EXTENSION,
+    CERTIFICATE_EXPORT_EXTENSION, CERTIFICATE_V2_EVENT_EXTENSION, ERASURE_EVIDENCE_EVENT_EXTENSION,
     ERASURE_EVIDENCE_EXPORT_EXTENSION, OPEN_CLOCKS_EXPORT_EXTENSION, RESERVED_NON_SIGNING_KIND,
     SEAL_FENCE_EXPORT_EXTENSION, SUPERSEDES_CHAIN_ID_EVENT_EXTENSION,
     SUPERSESSION_GRAPH_EXPORT_EXTENSION, USER_CONTENT_ATTESTATION_EVENT_EXTENSION,
@@ -136,18 +136,37 @@ pub(crate) fn decode_event_details_with_identity_admission(
     let event_type_bytes = map_lookup_bytes(header, "event_type")?;
     let event_type = String::from_utf8(event_type_bytes)
         .map_err(|_| VerifyError::new("header.event_type is not valid UTF-8"))?;
+    let extensions = map_lookup_optional_map(payload_map, "extensions")?;
+    if event_type == CERTIFICATE_V2_EVENT_EXTENSION {
+        let Some(selected) = extensions else {
+            return Err(VerifyError::new(
+                "v2 certificate event requires its v2 extension",
+            ));
+        };
+        let v2_count = selected
+            .iter()
+            .filter(|(key, _)| key.as_text() == Some(CERTIFICATE_V2_EVENT_EXTENSION))
+            .count();
+        let carries_v1 = selected
+            .iter()
+            .any(|(key, _)| key.as_text() == Some(CERTIFICATE_EVENT_EXTENSION));
+        if v2_count != 1 || carries_v1 {
+            return Err(VerifyError::new(
+                "v2 certificate event requires exactly one v2 extension and no v1 extension",
+            ));
+        }
+    }
     let classification_bytes = map_lookup_bytes(header, "classification")?;
     let classification = String::from_utf8(classification_bytes)
         .map_err(|_| VerifyError::new("header.classification is not valid UTF-8"))?;
 
     // Reuse the native profile's structural admission; unknown selections fail
     // before any payload is offered to a plaintext/domain reader.
-    let profile_selected =
-        map_lookup_optional_map(payload_map, "extensions")?.is_some_and(|extensions| {
-            extensions
-                .iter()
-                .any(|(key, _)| key.as_text() == Some(trellis_cddl::PROFILE_EXTENSION))
-        });
+    let profile_selected = extensions.is_some_and(|extensions| {
+        extensions
+            .iter()
+            .any(|(key, _)| key.as_text() == Some(trellis_cddl::PROFILE_EXTENSION))
+    });
     let protected_external = if profile_selected {
         trellis_cddl::parse_external_attachment_profile(payload_bytes)
             .map_err(|error| VerifyError::new(format!("external attachment profile: {error}")))?
@@ -167,7 +186,7 @@ pub(crate) fn decode_event_details_with_identity_admission(
         }
     };
 
-    let profile_extensions = match map_lookup_optional_map(payload_map, "extensions")? {
+    let profile_extensions = match extensions {
         Some(extensions) => decode_profile_extensions(
             extensions,
             authored_at,
@@ -221,6 +240,13 @@ fn decode_profile_extensions(
         );
     }
     if let Some(certificate) = decode_certificate_payload(extensions)? {
+        if certificate.version == CertificateVersion::V2
+            && event_type != certificate.version.extension()
+        {
+            return Err(VerifyError::new(
+                "v2 certificate extension requires exact v2 event_type",
+            ));
+        }
         decoded.insert(
             ProfileExtensionKind::CertificateOfCompletion,
             ProfileExtensionDetails::CertificateOfCompletion(certificate),
@@ -593,9 +619,26 @@ pub(crate) fn decode_erasure_evidence_details(
 pub(crate) fn decode_certificate_payload(
     extensions: &[(Value, Value)],
 ) -> Result<Option<CertificateDetails>, VerifyError> {
-    let Some(extension_value) = map_lookup_optional_value(extensions, CERTIFICATE_EVENT_EXTENSION)
-    else {
-        return Ok(None);
+    let v1 = map_lookup_optional_value(extensions, CERTIFICATE_EVENT_EXTENSION);
+    let v2 = map_lookup_optional_value(extensions, CERTIFICATE_V2_EVENT_EXTENSION);
+    if v2.is_some()
+        && extensions
+            .iter()
+            .filter(|(key, _)| key.as_text() == Some(CERTIFICATE_V2_EVENT_EXTENSION))
+            .count()
+            != 1
+    {
+        return Err(VerifyError::new("duplicate v2 certificate extension"));
+    }
+    let (version, extension_value) = match (v1, v2) {
+        (None, None) => return Ok(None),
+        (Some(value), None) => (CertificateVersion::V1, value),
+        (None, Some(value)) => (CertificateVersion::V2, value),
+        (Some(_), Some(_)) => {
+            return Err(VerifyError::new(
+                "certificate has ambiguous v1 and v2 extensions",
+            ));
+        }
     };
     let extension_map = extension_value
         .as_map()
@@ -652,12 +695,28 @@ pub(crate) fn decode_certificate_payload(
         let display_name = map_lookup_text(entry_map, "display_name")?;
         let display_role = map_lookup_optional_text(entry_map, "display_role")?;
         let signed_at = map_lookup_timestamp(entry_map, "signed_at")?;
+        let response_ref = match version {
+            CertificateVersion::V1 => None,
+            CertificateVersion::V2 => Some(bytes_array(&map_lookup_fixed_bytes(
+                entry_map,
+                "response_ref",
+                32,
+            )?)),
+        };
         signer_display.push(SignerDisplayDetails {
+            response_ref,
             principal_ref,
             display_name,
             display_role,
             signed_at,
         });
+    }
+    if version == CertificateVersion::V2
+        && map_lookup_optional_value(cs_map, "response_ref").is_some()
+    {
+        return Err(VerifyError::new(
+            "v2 forbids aggregate chain_summary.response_ref",
+        ));
     }
     let response_ref = map_lookup_optional_fixed_bytes(cs_map, "response_ref", 32)?
         .map(|bytes| bytes_array(&bytes));
@@ -719,6 +778,16 @@ pub(crate) fn decode_certificate_payload(
         ));
     }
 
+    if version == CertificateVersion::V2 {
+        let unique: std::collections::BTreeSet<_> = signing_events.iter().collect();
+        if unique.len() != signing_events.len() {
+            return Err(VerifyError::with_kind(
+                "v2 signing_events must contain distinct event hashes",
+                VerifyErrorKind::CertificateChainSummaryMismatch,
+            ));
+        }
+    }
+
     let workflow_ref = map_lookup_optional_text(extension_map, "workflow_ref")?;
 
     // Retain actual rows for the explicitly selected trusted-registry check.
@@ -749,6 +818,8 @@ pub(crate) fn decode_certificate_payload(
     }
 
     Ok(Some(CertificateDetails {
+        version,
+        canonical_payload: trellis_types::encode_canonical_cbor_value(extension_value)?,
         operator_attestations,
         certificate_id,
         case_ref,

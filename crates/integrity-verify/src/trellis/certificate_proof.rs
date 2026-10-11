@@ -5,7 +5,7 @@
 //! payload bytes and either receives a [`CertificateResponseProof`] (the
 //! consumer-domain resolver knew how to read this payload), `Ok(None)`
 //! (this payload is not a signing-event the resolver can interpret —
-//! continue), or `Err(ResolverError)` (the payload claimed to carry a
+//! preserve v1 compatibility; fail for v2), or `Err(ResolverError)` (the payload claimed to carry a
 //! response proof but the proof is malformed — fail closed at the caller).
 //!
 //! The matching consumer-side implementation lives in
@@ -79,7 +79,7 @@ pub trait ResponseProofResolver {
 /// No-op resolver used by Trellis Core's default `RecordValidator` impl.
 /// Always returns `Ok(None)` — every payload is treated as
 /// "not-recognizable", which preserves the prior `continue` behavior on
-/// Core-only verification paths (no consumer-domain field reading).
+/// Core-only v1 verification paths. V2 requires proof and fails closed on `None`.
 pub struct NoopResponseProofResolver;
 
 impl ResponseProofResolver for NoopResponseProofResolver {

@@ -72,8 +72,12 @@ pub(crate) fn finalize_certificates_of_completion(
             }
             std::collections::btree_map::Entry::Occupied(slot) => {
                 let prior = *slot.get();
-                let differs = prior.presentation_artifact.content_hash
-                    != payload.presentation_artifact.content_hash
+                let differs = prior.version != payload.version
+                    || ((prior.version == CertificateVersion::V2
+                        || payload.version == CertificateVersion::V2)
+                        && prior.canonical_payload != payload.canonical_payload)
+                    || prior.presentation_artifact.content_hash
+                        != payload.presentation_artifact.content_hash
                     || prior.signing_events != payload.signing_events
                     || prior.chain_summary.signer_count != payload.chain_summary.signer_count
                     || prior.completed_at != payload.completed_at
@@ -115,6 +119,38 @@ pub(crate) fn finalize_certificates_of_completion(
             chain_summary_consistent: true,
             failures: Vec::new(),
         };
+
+        if payload.version == CertificateVersion::V2 {
+            if !matches!(
+                payload.chain_summary.workflow_status.as_str(),
+                "completed" | "countersigned" | "notarized" | "partially-completed"
+            ) || payload
+                .chain_summary
+                .impact_level
+                .as_deref()
+                .is_some_and(|level| !matches!(level, "low" | "moderate" | "high"))
+            {
+                certificate_failure(
+                    &mut outcome,
+                    event_failures,
+                    VerificationFailureKind::CertificateEnumExtensionUnknown,
+                    canonical_hash,
+                );
+            }
+            if payload.chain_summary.covered_claims.iter().any(|claim| {
+                !matches!(
+                    claim.as_str(),
+                    "signer_count" | "principal_ref" | "signed_at" | "response_ref"
+                )
+            }) {
+                certificate_failure(
+                    &mut outcome,
+                    event_failures,
+                    VerificationFailureKind::CertificateCoveredClaimUnknown,
+                    canonical_hash,
+                );
+            }
+        }
 
         // Step 3: malformed rows or failed selected trust/signature checks
         // surface as attestation_insufficient. With no trust selection,
@@ -158,8 +194,12 @@ pub(crate) fn finalize_certificates_of_completion(
                 ));
                 continue;
             };
-            if let Some(principal_ref) = resolver.resolve_principal_ref(&payload_bytes)
-                && display.principal_ref != principal_ref
+            let principal_ref = resolver.resolve_principal_ref(&payload_bytes);
+            if (payload.version == CertificateVersion::V2
+                && principal_ref
+                    .as_deref()
+                    .is_none_or(|principal| principal.trim().is_empty()))
+                || principal_ref.is_some_and(|principal| display.principal_ref != principal)
             {
                 outcome.chain_summary_consistent = false;
                 outcome
@@ -169,6 +209,32 @@ pub(crate) fn finalize_certificates_of_completion(
                     VerificationFailureKind::CertificateChainSummaryMismatch,
                     hex_string(canonical_hash),
                 ));
+            }
+            if payload.version == CertificateVersion::V2 {
+                match resolver.resolve(&payload_bytes) {
+                    Ok(Some(proof)) if display.response_ref == Some(proof.response_hash) => {}
+                    Ok(Some(_)) => certificate_failure(
+                        &mut outcome,
+                        event_failures,
+                        VerificationFailureKind::ResponseRefMismatch,
+                        canonical_hash,
+                    ),
+                    Ok(None) => {
+                        outcome.all_signing_events_resolved = false;
+                        certificate_failure(
+                            &mut outcome,
+                            event_failures,
+                            VerificationFailureKind::SigningEventUnresolved,
+                            signing_event_hash,
+                        );
+                    }
+                    Err(_) => certificate_failure(
+                        &mut outcome,
+                        event_failures,
+                        VerificationFailureKind::MalformedResponseDigest,
+                        canonical_hash,
+                    ),
+                }
             }
             // Step 6: signed_at MUST equal authored_at (timestamp exact, no skew).
             if display.signed_at != target.authored_at {
@@ -183,7 +249,9 @@ pub(crate) fn finalize_certificates_of_completion(
             }
         }
 
-        if let Some(response_ref) = payload.chain_summary.response_ref {
+        if payload.version == CertificateVersion::V1
+            && let Some(response_ref) = payload.chain_summary.response_ref
+        {
             let mut matched = false;
             let mut had_resolvable_response = false;
             for signing_event_hash in &payload.signing_events {
@@ -261,6 +329,9 @@ pub(crate) fn certificate_catalog_row_matches_details(
         return false;
     };
     if row.canonical_event_hash != details.canonical_event_hash {
+        return false;
+    }
+    if certificate.version != CertificateVersion::V1 {
         return false;
     }
     if row.certificate_id != certificate.certificate_id {
@@ -547,7 +618,7 @@ fn verify_operator_attestations(
                 return false;
             };
             if authority.authority_class != row.authority_class
-                || authority.allowed_purpose != CERTIFICATE_EVENT_EXTENSION
+                || authority.allowed_purpose != payload.version.extension()
                 || authority.valid_from.nanos >= 1_000_000_000
                 || authority.valid_until.nanos >= 1_000_000_000
                 || authority.valid_from > authority.valid_until
@@ -569,4 +640,16 @@ fn verify_operator_attestations(
             };
             integrity_cose::verify_ed25519_signature(authority.public_key, &preimage, signature)
         })
+}
+
+/// Adds one localized failure and prevents a successful integrity fold.
+fn certificate_failure(
+    outcome: &mut CertificateOfCompletionOutcome,
+    failures: &mut Vec<VerificationFailure>,
+    kind: VerificationFailureKind,
+    hash: &[u8; 32],
+) {
+    outcome.chain_summary_consistent = false;
+    outcome.failures.push(kind.as_str().into());
+    failures.push(VerificationFailure::new(kind, hex_string(hash)));
 }
