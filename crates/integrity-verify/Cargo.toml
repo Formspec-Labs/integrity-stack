@@ -22,5 +22,6 @@ trellis-cddl = { path = "../../../trellis/crates/trellis-cddl" }
 trellis-types = { path = "../../../trellis/crates/trellis-types" }
 
 [dev-dependencies]
+integrity-seam = { path = "../integrity-seam" }
 ed25519-dalek = "2.1"
 trellis-export-writer = { path = "../../../trellis/crates/trellis-export-writer", features = ["fixture-inputs"] }

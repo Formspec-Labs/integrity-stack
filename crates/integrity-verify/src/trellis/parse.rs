@@ -721,10 +721,8 @@ pub(crate) fn decode_certificate_payload(
 
     let workflow_ref = map_lookup_optional_text(extension_map, "workflow_ref")?;
 
-    // Step 3 (Phase-1 structural): every attestation row carries a 64-byte
-    // signature and a recognized `authority_class`. Crypto-verification of
-    // the Ed25519 signature itself rides Phase-2+ — same posture as the
-    // existing posture-transition + erasure flows.
+    // Retain actual rows for the explicitly selected trusted-registry check.
+    // Without a selected registry the outcome is explicitly authority-unchecked.
     let attestations = map_lookup_array(extension_map, "attestations")?;
     if attestations.is_empty() {
         return Err(VerifyError::new(
@@ -732,19 +730,26 @@ pub(crate) fn decode_certificate_payload(
         ));
     }
     let mut attestation_signatures_well_formed = true;
+    let mut operator_attestations = Vec::with_capacity(attestations.len());
     for entry in attestations {
         let entry_map = entry
             .as_map()
             .ok_or_else(|| VerifyError::new("attestation entry is not a map"))?;
-        let _class = map_lookup_text(entry_map, "authority_class")?;
+        let authority_class = map_lookup_text(entry_map, "authority_class")?;
         let signature = map_lookup_bytes(entry_map, "signature")?;
-        if signature.len() != 64 {
+        if signature.len() != 64 || !matches!(authority_class.as_str(), "prior" | "new") {
             attestation_signatures_well_formed = false;
         }
-        let _authority = map_lookup_text(entry_map, "authority")?;
+        let authority = map_lookup_text(entry_map, "authority")?;
+        operator_attestations.push(CertificateOperatorAttestation {
+            authority,
+            authority_class,
+            signature,
+        });
     }
 
     Ok(Some(CertificateDetails {
+        operator_attestations,
         certificate_id,
         case_ref,
         completed_at,

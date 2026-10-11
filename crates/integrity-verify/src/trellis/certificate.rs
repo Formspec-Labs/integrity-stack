@@ -44,6 +44,7 @@ pub(crate) fn finalize_certificates_of_completion(
     event_by_hash_idx: &BTreeMap<[u8; 32], usize>,
     payload_blobs: Option<&BTreeMap<[u8; 32], Vec<u8>>>,
     resolver: &dyn ResponseProofResolver,
+    authorities: Option<&CertificateAuthorityRegistry>,
     event_failures: &mut Vec<VerificationFailure>,
 ) -> Vec<CertificateOfCompletionOutcome> {
     if payloads.is_empty() {
@@ -90,7 +91,15 @@ pub(crate) fn finalize_certificates_of_completion(
     let mut outcomes: Vec<CertificateOfCompletionOutcome> = Vec::with_capacity(payloads.len());
 
     for (index, payload, canonical_hash) in payloads {
+        let attestation_authority = match authorities {
+            None => CertificateAttestationAuthorityStatus::Unchecked,
+            Some(registry) if verify_operator_attestations(payload, registry) => {
+                CertificateAttestationAuthorityStatus::Verified
+            }
+            Some(_) => CertificateAttestationAuthorityStatus::Failed,
+        };
         let mut outcome = CertificateOfCompletionOutcome {
+            attestation_authority,
             certificate_id: payload.certificate_id.clone(),
             event_index: *index as u64,
             completed_at: payload.completed_at,
@@ -107,11 +116,12 @@ pub(crate) fn finalize_certificates_of_completion(
             failures: Vec::new(),
         };
 
-        // Step 3 (Phase-1 structural attestation contract): if any row was
-        // malformed at decode time, surface as `attestation_insufficient`
-        // (existing code reused per ADR 0007 §"Verifier obligations" step 3).
-        // Crypto verification rides Phase-2+.
-        if !payload.attestation_signatures_well_formed {
+        // Step 3: malformed rows or failed selected trust/signature checks
+        // surface as attestation_insufficient. With no trust selection,
+        // authority remains explicitly Unchecked rather than a crypto claim.
+        if !payload.attestation_signatures_well_formed
+            || attestation_authority == CertificateAttestationAuthorityStatus::Failed
+        {
             outcome.chain_summary_consistent = false;
             outcome.failures.push("attestation_insufficient".into());
             event_failures.push(VerificationFailure::new(
@@ -524,4 +534,39 @@ pub(crate) fn verify_certificate_attachment_lineage(
             ));
         }
     }
+}
+
+/// Verifies all operator rows using only the externally selected trust snapshot.
+fn verify_operator_attestations(
+    payload: &CertificateDetails,
+    registry: &CertificateAuthorityRegistry,
+) -> bool {
+    !payload.operator_attestations.is_empty()
+        && payload.operator_attestations.iter().all(|row| {
+            let Some(authority) = registry.get(&row.authority) else {
+                return false;
+            };
+            if authority.authority_class != row.authority_class
+                || authority.allowed_purpose != CERTIFICATE_EVENT_EXTENSION
+                || authority.valid_from.nanos >= 1_000_000_000
+                || authority.valid_until.nanos >= 1_000_000_000
+                || authority.valid_from > authority.valid_until
+                || payload.completed_at < authority.valid_from
+                || payload.completed_at > authority.valid_until
+            {
+                return false;
+            }
+            let Ok(signature) = row.signature.as_slice().try_into() else {
+                return false;
+            };
+            let Ok(preimage) = trellis_cddl::certificate_attestation_preimage(
+                &payload.certificate_id,
+                payload.completed_at.seconds,
+                payload.completed_at.nanos,
+                &row.authority_class,
+            ) else {
+                return false;
+            };
+            integrity_cose::verify_ed25519_signature(authority.public_key, &preimage, signature)
+        })
 }

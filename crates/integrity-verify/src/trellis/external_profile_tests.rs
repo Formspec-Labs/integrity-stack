@@ -226,6 +226,7 @@ fn certificate_cannot_resolve_protected_presentation_from_matching_ciphertext_di
     let cert_details = decode_event_details(&certificate_event).unwrap();
     let cert = cert_details.certificate().unwrap();
     let outcome = CertificateOfCompletionOutcome {
+        attestation_authority: CertificateAttestationAuthorityStatus::Unchecked,
         certificate_id: cert.certificate_id.clone(),
         event_index: 1,
         completed_at: cert.completed_at,

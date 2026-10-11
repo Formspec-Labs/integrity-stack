@@ -95,6 +95,7 @@ pub struct ErasureEvidenceOutcome {
 /// `signing_event_unresolved`, `presentation_artifact_content_mismatch`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertificateOfCompletionOutcome {
+    pub attestation_authority: CertificateAttestationAuthorityStatus,
     pub certificate_id: String,
     pub event_index: u64,
     pub completed_at: TrellisTimestamp,
@@ -104,6 +105,37 @@ pub struct CertificateOfCompletionOutcome {
     pub chain_summary_consistent: bool,
     pub failures: Vec<String>,
 }
+
+/// Result of the explicitly selected certificate operator trust check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertificateAttestationAuthorityStatus {
+    /// No externally trusted registry was selected; shape is not authority proof.
+    Unchecked,
+    /// Every row verified under selected trust over ID, completion time and class.
+    /// Other certificate facts are bound separately by the event signature.
+    Verified,
+    /// At least one selected trust or signature check failed.
+    Failed,
+}
+
+/// Externally trusted operator key binding for completion certificates only.
+///
+/// Configure this outside the untrusted export. Append rights, an embedded key
+/// or the attestation's self-asserted authority URI do not establish this trust.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustedCertificateAuthority {
+    pub public_key: [u8; 32],
+    pub authority_class: String,
+    /// Must equal `trellis.certificate-of-completion.v1` for this check.
+    pub allowed_purpose: String,
+    /// Inclusive first permitted completed_at.
+    pub valid_from: TrellisTimestamp,
+    /// Inclusive last permitted completed_at; no implicit unlimited authority.
+    pub valid_until: TrellisTimestamp,
+}
+
+/// Explicitly selected trusted bindings keyed by exact authority URI.
+pub type CertificateAuthorityRegistry = BTreeMap<String, TrustedCertificateAuthority>;
 
 /// Outcome for one ADR 0010 user-content-attestation verification (Core
 /// §19 step 6d). One entry per `trellis.user-content-attestation.v1`
@@ -664,10 +696,11 @@ pub(crate) struct ErasureEvidenceDetails {
 /// hash) and the report-level fields surfaced through
 /// [`CertificateOfCompletionOutcome`]. CDDL decode + chain-summary
 /// invariants (steps 1 and 2) run in [`decode_certificate_payload`]; step 3
-/// (attestation crypto) shape-checks at decode time and crypto-verification
-/// is deferred to Phase 2+ — see [`TRANSITION_ATTESTATION_DOMAIN`].
+/// shape checks run at decode time, while explicitly selected operator trust
+/// and signature checks run at certificate finalization.
 #[derive(Clone, Debug)]
 pub(crate) struct CertificateDetails {
+    pub(crate) operator_attestations: Vec<CertificateOperatorAttestation>,
     pub(crate) certificate_id: String,
     /// Reserved for §6.4 operator obligations; Phase-1 verifier captures the
     /// field but does not gate on its presence beyond the CDDL shape.
@@ -682,12 +715,7 @@ pub(crate) struct CertificateDetails {
     /// captured for completeness, not gated.
     #[allow(dead_code)]
     pub(crate) workflow_ref: Option<String>,
-    /// Phase-1 contract: every attestation row has structural shape
-    /// (64-byte signature; valid `authority_class`). Crypto-verification
-    /// of the Ed25519 signature itself is deferred to Phase-2+ alongside
-    /// the posture-transition + erasure flows — see
-    /// [`TRANSITION_ATTESTATION_DOMAIN`]. Maps to step-3 contract; surfaces
-    /// via the existing `attestation_insufficient` failure code.
+    /// Shape admission remains separate from explicitly selected operator trust.
     pub(crate) attestation_signatures_well_formed: bool,
 }
 
@@ -969,4 +997,11 @@ pub(crate) struct ChainEventSummary {
     pub(crate) signing_kid: Vec<u8>,
     pub(crate) wrap_recipients: Vec<Vec<u8>>,
     pub(crate) canonical_event_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CertificateOperatorAttestation {
+    pub(crate) authority: String,
+    pub(crate) authority_class: String,
+    pub(crate) signature: Vec<u8>,
 }

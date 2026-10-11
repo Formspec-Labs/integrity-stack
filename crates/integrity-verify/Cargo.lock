@@ -581,6 +581,7 @@ dependencies = [
  "integrity-bundle",
  "integrity-canonical",
  "integrity-cose",
+ "integrity-seam",
  "serde_json",
  "trellis-cddl",
  "trellis-export-writer",

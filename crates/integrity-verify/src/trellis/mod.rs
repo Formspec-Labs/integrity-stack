@@ -899,6 +899,7 @@ pub(crate) fn verify_event_set_with_classes(
         &event_by_hash_idx,
         payload_blobs,
         record_validator.response_proof_resolver(),
+        record_validator.certificate_authority_registry(),
         &mut event_failures,
     );
 
@@ -929,6 +930,11 @@ pub(crate) fn verify_event_set_with_classes(
     if protected_originals_unchecked {
         trellis.readability_verified = false;
         trellis.warnings.push("Supported protected external attachment: ciphertext integrity checks do not establish decrypted original bytes or recipient permission; generic verification does not perform those checks.".to_owned());
+    }
+    for certificate in &trellis.certificates_of_completion {
+        if certificate.attestation_authority == CertificateAttestationAuthorityStatus::Unchecked {
+            trellis.warnings.push(format!("Certificate {} operator attestation authority is unchecked: no externally trusted registry selected; event signatures and attestation shape do not establish operator authority.", certificate.certificate_id));
+        }
     }
     let domain_findings = record_validator.validate_events(&domain_events);
     VerificationWithDomain {
@@ -1022,3 +1028,6 @@ const RESERVED_NON_SIGNING_KIND: &[&str] = &["tenant-root", "scope", "subject", 
 
 #[cfg(test)]
 mod external_profile_tests;
+
+#[cfg(test)]
+mod certificate_authority_tests;

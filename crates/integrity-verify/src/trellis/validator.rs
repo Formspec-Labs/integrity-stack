@@ -242,6 +242,16 @@ impl VerificationWithDomain {
 
 /// Consumer-owned domain verifier.
 pub trait RecordValidator {
+    /// Selects externally trusted certificate operator keys, independent of event signing keys.
+    ///
+    /// None leaves authority unchecked. Some (including an empty registry) selects
+    /// strict verification: every operator attestation must resolve and verify.
+    fn certificate_authority_registry(
+        &self,
+    ) -> Option<&crate::trellis::CertificateAuthorityRegistry> {
+        None
+    }
+
     /// Returns true when the domain owns this identity-attestation event type.
     fn admits_identity_attestation_event_type(&self, _event_type: &str) -> bool {
         false
