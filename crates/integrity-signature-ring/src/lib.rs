@@ -1935,8 +1935,14 @@ mod tests {
         let receipt = verifier.verify(&request, &test_registry()).expect("verify");
         assert!(receipt.is_verified());
         assert_eq!(receipt.verified_at, RECORDED_TIME);
-        assert_eq!(receipt.adapter.id, test_config().adapter_id);
-        assert_eq!(receipt.adapter.version, test_config().adapter_version);
+        assert_eq!(
+            receipt.adapter.id.as_str(),
+            test_config().adapter_id.as_str()
+        );
+        assert_eq!(
+            receipt.adapter.version.as_str(),
+            test_config().adapter_version.as_str()
+        );
         assert!(receipt.receipt_bytes.is_none());
 
         request.signed_bytes.push(0);
