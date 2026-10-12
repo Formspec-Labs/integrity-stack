@@ -167,17 +167,11 @@ impl RingVerifier {
     }
 
     pub fn new_with_clock_and_config(clock: ClockHandle, config: RingVerifierConfig) -> Self {
-        Self {
-            adapter_info: AdapterInfo {
-                id: config.adapter_id.into(),
-                version: config.adapter_version.into(),
-            },
-            method_uri_prefix: config.method_uri_prefix,
-            receipt_payload_domain: config.receipt_payload_domain,
+        Self::new_with_clock_config_and_key_resolver(
             clock,
-            key_resolver: Arc::new(StaticKeyResolver::empty()),
-            receipt_signer: None,
-        }
+            config,
+            Arc::new(StaticKeyResolver::empty()),
+        )
     }
 
     /// Builds a `RingVerifier` wired to the supplied [`KeyResolver`].
@@ -198,6 +192,20 @@ impl RingVerifier {
         config: RingVerifierConfig,
         resolver: KeyResolverHandle,
     ) -> Self {
+        Self::new_with_clock_config_and_key_resolver(Arc::new(SystemClock), config, resolver)
+    }
+
+    /// Builds a verifier with the supplied clock, configuration, and key resolver.
+    ///
+    /// Receipts use `clock` for their verification time. Key identifier requests
+    /// use `resolver`; raw public keys bypass it. Method and receipt policies
+    /// come from `config`, and receipts remain unsigned.
+    #[must_use]
+    pub fn new_with_clock_config_and_key_resolver(
+        clock: ClockHandle,
+        config: RingVerifierConfig,
+        resolver: KeyResolverHandle,
+    ) -> Self {
         Self {
             adapter_info: AdapterInfo {
                 id: config.adapter_id.into(),
@@ -205,7 +213,7 @@ impl RingVerifier {
             },
             method_uri_prefix: config.method_uri_prefix,
             receipt_payload_domain: config.receipt_payload_domain,
-            clock: Arc::new(SystemClock),
+            clock,
             key_resolver: resolver,
             receipt_signer: None,
         }
@@ -1904,6 +1912,39 @@ mod tests {
             )
             .expect("verify");
         assert!(receipt.is_verified(), "kid-resolved ed25519 must verify");
+    }
+
+    #[test]
+    fn injected_clock_and_key_resolver_preserve_recorded_receipt_time() {
+        const RECORDED_TIME: &str = "2001-02-03T04:05:06Z";
+        let kid = b"historical-key".to_vec();
+        let (signed_bytes, signature_bytes, public_key) = ed25519_envelope_with_kid(&kid);
+        let mut resolver = StaticKeyResolver::empty();
+        resolver.insert(kid.clone(), public_key);
+        let verifier = RingVerifier::new_with_clock_config_and_key_resolver(
+            Arc::new(FixedClock::at_rfc3339(RECORDED_TIME).expect("recorded clock")),
+            test_config(),
+            Arc::new(resolver),
+        );
+        let mut request = VerifyRequest {
+            signed_bytes,
+            signature_bytes,
+            method_uri: "urn:formspec:sig-method:ed25519-cose-sign1@1".into(),
+            key_ref: KeyRef::Kid(kid),
+        };
+        let receipt = verifier.verify(&request, &test_registry()).expect("verify");
+        assert!(receipt.is_verified());
+        assert_eq!(receipt.verified_at, RECORDED_TIME);
+        assert_eq!(receipt.adapter.id, test_config().adapter_id);
+        assert_eq!(receipt.adapter.version, test_config().adapter_version);
+        assert!(receipt.receipt_bytes.is_none());
+
+        request.signed_bytes.push(0);
+        let receipt = verifier
+            .verify(&request, &test_registry())
+            .expect("verdict");
+        assert_eq!(receipt.result, VerificationResult::Failed);
+        assert_eq!(receipt.verified_at, RECORDED_TIME);
     }
 
     /// fs-skj0 — kid mismatch attack vector. COSE envelope carries
