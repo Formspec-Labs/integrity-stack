@@ -163,6 +163,27 @@ pub fn canonical_response_handoff_bytes(response: &Value) -> Result<Vec<u8>, Str
     domain_separated_canonical_bytes(RESPONSE_HANDOFF_DOMAIN, response)
 }
 
+/// Decodes bytes produced by [`canonical_response_handoff_bytes`].
+///
+/// Accepts only the exact domain tag, separator byte and canonical JSON, so a
+/// consumer of protected Response plaintext cannot accept another encoding.
+///
+/// # Errors
+///
+/// Returns an error when the domain tag, JSON or canonical form differs.
+pub fn parse_canonical_response_handoff_bytes(bytes: &[u8]) -> Result<Value, String> {
+    let json = bytes
+        .strip_prefix(RESPONSE_HANDOFF_DOMAIN.as_bytes())
+        .and_then(|rest| rest.strip_prefix(&[DOMAIN_SEPARATOR_BYTE]))
+        .ok_or("response handoff domain tag differs")?;
+    let value: Value =
+        serde_json::from_slice(json).map_err(|_| "response handoff JSON is invalid".to_string())?;
+    if canonical_response_handoff_bytes(&value)? != bytes {
+        return Err("response handoff bytes are not canonical".to_string());
+    }
+    Ok(value)
+}
+
 /// Canonicalizes raw JSON bytes via RFC 8785 JCS.
 ///
 /// Lets callers pass wire bytes through to the byte authority instead of
@@ -401,5 +422,25 @@ mod tests {
             d1.digest, d2.digest,
             "digests must be identical regardless of JSON key insertion order"
         );
+    }
+}
+
+#[cfg(test)]
+mod handoff_decode_tests {
+    use super::*;
+
+    #[test]
+    fn handoff_bytes_round_trip_and_other_encodings_refuse() {
+        let response = serde_json::json!({"id": "r-1", "data": {"b": 2, "a": 1}});
+        let bytes = canonical_response_handoff_bytes(&response).unwrap();
+        assert_eq!(parse_canonical_response_handoff_bytes(&bytes).unwrap(), response);
+        // Bare canonical JSON, a foreign domain and non-canonical spacing all refuse.
+        assert!(parse_canonical_response_handoff_bytes(&canonical_json_bytes(&response).unwrap()).is_err());
+        let foreign = domain_separated_canonical_bytes("formspec.other.v1", &response).unwrap();
+        assert!(parse_canonical_response_handoff_bytes(&foreign).is_err());
+        let mut spaced = RESPONSE_HANDOFF_DOMAIN.as_bytes().to_vec();
+        spaced.push(DOMAIN_SEPARATOR_BYTE);
+        spaced.extend_from_slice(br#"{ "id": "r-1", "data": {"a": 1, "b": 2} }"#);
+        assert!(parse_canonical_response_handoff_bytes(&spaced).is_err());
     }
 }
