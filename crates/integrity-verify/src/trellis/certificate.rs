@@ -175,39 +175,26 @@ pub(crate) fn finalize_certificates_of_completion(
         for (i, signing_event_hash) in payload.signing_events.iter().enumerate() {
             let resolved = event_by_hash(signing_event_hash);
             let Some(target) = resolved else {
-                outcome.all_signing_events_resolved = false;
-                outcome.failures.push("signing_event_unresolved".into());
-                event_failures.push(VerificationFailure::new(
-                    VerificationFailureKind::SigningEventUnresolved,
-                    hex_string(signing_event_hash),
-                ));
+                row_unresolved(&mut outcome, event_failures, signing_event_hash);
                 continue;
             };
             let display = &payload.chain_summary.signer_display[i];
             let Some(payload_bytes) = readable_payload_for_certificate(target, payload_blobs)
             else {
-                outcome.all_signing_events_resolved = false;
-                outcome.failures.push("signing_event_unresolved".into());
-                event_failures.push(VerificationFailure::new(
-                    VerificationFailureKind::SigningEventUnresolved,
-                    hex_string(signing_event_hash),
-                ));
+                row_unresolved(&mut outcome, event_failures, signing_event_hash);
                 continue;
             };
             let principal_ref = resolver.resolve_principal_ref(&payload_bytes);
-            // Core §19 step 6c (v2): a missing or empty principal leaves the
-            // row unresolvable; no trimming, so verifiers cannot diverge on
-            // whitespace definitions.
-            if payload.version == CertificateVersion::V2
-                && principal_ref.as_deref().is_none_or(str::is_empty)
+            let v2_proof = (payload.version == CertificateVersion::V2)
+                .then(|| resolver.resolve(&payload_bytes));
+            // Core §19 step 6c (v2): a missing or empty principal (compared
+            // exactly, no trimming) or an absent proof leaves the row
+            // unresolvable, and the row's other checks are skipped.
+            if v2_proof.is_some()
+                && (principal_ref.as_deref().is_none_or(str::is_empty)
+                    || matches!(v2_proof, Some(Ok(None))))
             {
-                outcome.all_signing_events_resolved = false;
-                certificate_failure(
-                    &mut outcome,
-                    event_failures,
-                    VerificationFailureKind::SigningEventUnresolved,
-                    signing_event_hash,
-                );
+                row_unresolved(&mut outcome, event_failures, signing_event_hash);
                 continue;
             }
             if principal_ref.is_some_and(|principal| display.principal_ref != principal) {
@@ -220,31 +207,21 @@ pub(crate) fn finalize_certificates_of_completion(
                     hex_string(canonical_hash),
                 ));
             }
-            if payload.version == CertificateVersion::V2 {
-                match resolver.resolve(&payload_bytes) {
-                    Ok(Some(proof)) if display.response_ref == Some(proof.response_hash) => {}
-                    Ok(Some(_)) => certificate_failure(
-                        &mut outcome,
-                        event_failures,
-                        VerificationFailureKind::ResponseRefMismatch,
-                        canonical_hash,
-                    ),
-                    Ok(None) => {
-                        outcome.all_signing_events_resolved = false;
-                        certificate_failure(
-                            &mut outcome,
-                            event_failures,
-                            VerificationFailureKind::SigningEventUnresolved,
-                            signing_event_hash,
-                        );
-                    }
-                    Err(_) => certificate_failure(
-                        &mut outcome,
-                        event_failures,
-                        VerificationFailureKind::MalformedResponseDigest,
-                        canonical_hash,
-                    ),
-                }
+            match v2_proof {
+                Some(Ok(Some(proof))) if display.response_ref == Some(proof.response_hash) => {}
+                Some(Ok(_)) => certificate_failure(
+                    &mut outcome,
+                    event_failures,
+                    VerificationFailureKind::ResponseRefMismatch,
+                    canonical_hash,
+                ),
+                Some(Err(_)) => certificate_failure(
+                    &mut outcome,
+                    event_failures,
+                    VerificationFailureKind::MalformedResponseDigest,
+                    canonical_hash,
+                ),
+                None => {}
             }
             // Step 6: signed_at MUST equal authored_at (timestamp exact, no skew).
             if display.signed_at != target.authored_at {
@@ -650,6 +627,21 @@ fn verify_operator_attestations(
             };
             integrity_cose::verify_ed25519_signature(authority.public_key, &preimage, signature)
         })
+}
+
+/// An unresolvable signing-event row (Core §19 step 6c): fails
+/// `signing_event_unresolved` and `all_signing_events_resolved`, nothing else.
+fn row_unresolved(
+    outcome: &mut CertificateOfCompletionOutcome,
+    failures: &mut Vec<VerificationFailure>,
+    signing_event_hash: &[u8; 32],
+) {
+    outcome.all_signing_events_resolved = false;
+    outcome.failures.push("signing_event_unresolved".into());
+    failures.push(VerificationFailure::new(
+        VerificationFailureKind::SigningEventUnresolved,
+        hex_string(signing_event_hash),
+    ));
 }
 
 /// Adds one localized failure and prevents a successful integrity fold.

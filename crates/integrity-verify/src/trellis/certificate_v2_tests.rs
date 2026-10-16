@@ -290,10 +290,11 @@ fn v2_missing_wrong_principal_and_wrong_timestamp_fail() {
             _ => events[1].authored_at.nanos += 1,
         }
         let (outcome, failures) = finalize(certificate, &events, &resolver, None);
-        assert!(!outcome.chain_summary_consistent, "case {case}");
         assert!(!failures.is_empty());
+        assert_eq!(outcome.chain_summary_consistent, case == 0, "case {case}");
         if case == 0 {
-            // A missing principal leaves the row unresolvable, not "wrong".
+            // A missing principal leaves the row unresolvable, not "wrong":
+            // summary consistency is untouched.
             assert!(!outcome.all_signing_events_resolved);
             assert!(outcome.failures.iter().all(|kind| kind == "signing_event_unresolved"));
         }
