@@ -4,6 +4,18 @@
 //! This crate runs an independent Trellis Python verifier projection and the
 //! target `integrity_verify::trellis` implementation over the same export ZIP
 //! bytes, then compares stable JSON-compatible projections.
+//!
+//! # What the gate does and does not check
+//!
+//! The projection is the structured report only: verdicts, failure kinds and
+//! locations, per-outcome fields (including certificate
+//! `attestation_authority`) and domain findings. Free-text warnings are not
+//! compared. The oracle runs with no external trust registry, so operator
+//! authority is only ever `unchecked` here, never `verified` or `failed`. The
+//! corpus is the committed `trellis/fixtures/vectors` export and tamper ZIPs; it
+//! has no protected-presentation certificate and few v2 negative cases, so
+//! those paths are not covered by this gate. Passing means "agrees on this
+//! corpus", not "the two verifiers are equivalent".
 
 #![forbid(unsafe_code)]
 
@@ -52,7 +64,6 @@ pub struct ReportProjection {
     pub correction_preservations: Vec<CorrectionPreservationProjection>,
     pub interop_sidecars: Vec<InteropSidecarProjection>,
     pub domain_findings: Vec<DomainFindingProjection>,
-    pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub substrate_tier: Option<String>,
 }
@@ -108,6 +119,8 @@ pub struct CertificateProjection {
     pub attachment_resolved: bool,
     pub all_signing_events_resolved: bool,
     pub chain_summary_consistent: bool,
+    /// `unchecked`, `verified` or `failed` (Core §19 step 6c).
+    pub attestation_authority: String,
     pub failures: Vec<String>,
 }
 
@@ -262,6 +275,8 @@ fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> 
             attachment_resolved: outcome.attachment_resolved,
             all_signing_events_resolved: outcome.all_signing_events_resolved,
             chain_summary_consistent: outcome.chain_summary_consistent,
+            attestation_authority: format!("{:?}", outcome.attestation_authority)
+                .to_ascii_lowercase(),
             failures: outcome.failures.clone(),
         })
         .collect();
@@ -355,7 +370,6 @@ fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> 
                 message: finding.message.clone(),
             })
             .collect(),
-        warnings: trellis.warnings,
         substrate_tier: None,
     }
 }
@@ -370,13 +384,14 @@ fn run_target(fixture_bytes: Vec<u8>) -> (ReportProjection, TargetMetadata) {
 
 fn run_python_oracle(fixture_path: &Path) -> Result<ReportProjection, ParityError> {
     let trellis_root = trellis_repo_root();
+    sync_oracle_environment(&trellis_root)?;
     let mut command = Command::new("uv");
     command
         .arg("run")
-        .arg("--with")
-        .arg("cbor2")
-        .arg("--with")
-        .arg("cryptography")
+        .arg("--project")
+        .arg(trellis_root.join("trellis-py"))
+        .arg("--frozen")
+        .arg("--no-sync")
         .arg("python")
         .arg("-m")
         .arg("trellis_py.parity_oracle")
@@ -406,6 +421,27 @@ fn run_python_oracle(fixture_path: &Path) -> Result<ReportProjection, ParityErro
             String::from_utf8_lossy(&output.stdout)
         ))
     })
+}
+
+/// Installs the oracle's locked dependencies (`trellis-py/uv.lock`, never
+/// floating versions) once per process; tests run in parallel and concurrent
+/// syncs corrupt the shared virtual environment.
+fn sync_oracle_environment(trellis_root: &Path) -> Result<(), ParityError> {
+    static SYNC: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    SYNC.get_or_init(|| {
+        let output = Command::new("uv")
+            .args(["sync", "--frozen", "--no-install-project", "--project"])
+            .arg(trellis_root.join("trellis-py"))
+            .output()
+            .map_err(|error| format!("run uv sync: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        }
+    })
+    .clone()
+    .map_err(|message| ParityError::new(format!("sync oracle environment: {message}")))
 }
 
 fn trellis_repo_root() -> PathBuf {

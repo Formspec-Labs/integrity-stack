@@ -195,12 +195,22 @@ pub(crate) fn finalize_certificates_of_completion(
                 continue;
             };
             let principal_ref = resolver.resolve_principal_ref(&payload_bytes);
-            if (payload.version == CertificateVersion::V2
-                && principal_ref
-                    .as_deref()
-                    .is_none_or(|principal| principal.trim().is_empty()))
-                || principal_ref.is_some_and(|principal| display.principal_ref != principal)
+            // Core §19 step 6c (v2): a missing or empty principal leaves the
+            // row unresolvable; no trimming, so verifiers cannot diverge on
+            // whitespace definitions.
+            if payload.version == CertificateVersion::V2
+                && principal_ref.as_deref().is_none_or(str::is_empty)
             {
+                outcome.all_signing_events_resolved = false;
+                certificate_failure(
+                    &mut outcome,
+                    event_failures,
+                    VerificationFailureKind::SigningEventUnresolved,
+                    signing_event_hash,
+                );
+                continue;
+            }
+            if principal_ref.is_some_and(|principal| display.principal_ref != principal) {
                 outcome.chain_summary_consistent = false;
                 outcome
                     .failures

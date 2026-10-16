@@ -292,6 +292,11 @@ fn v2_missing_wrong_principal_and_wrong_timestamp_fail() {
         let (outcome, failures) = finalize(certificate, &events, &resolver, None);
         assert!(!outcome.chain_summary_consistent, "case {case}");
         assert!(!failures.is_empty());
+        if case == 0 {
+            // A missing principal leaves the row unresolvable, not "wrong".
+            assert!(!outcome.all_signing_events_resolved);
+            assert!(outcome.failures.iter().all(|kind| kind == "signing_event_unresolved"));
+        }
     }
 }
 #[test]
