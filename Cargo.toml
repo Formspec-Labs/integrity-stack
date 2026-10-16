@@ -10,6 +10,7 @@ members = [
     "crates/integrity-canonical",
     "crates/integrity-cbor",
     "crates/integrity-cose",
+    "crates/integrity-disclosure",
     "crates/integrity-event",
     "crates/integrity-hpke",
     "crates/integrity-seam",

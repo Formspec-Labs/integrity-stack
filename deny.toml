@@ -1,0 +1,30 @@
+# cargo-deny configuration for the integrity-stack CRYPTO_OWNER fence (owner rule fs-dlou).
+# Run: cargo deny check bans
+#
+# Hashing, signing and hex encoding live only in the crates named below. A new crate that needs
+# SHA-256, Ed25519 or raw bytes as hex calls integrity-canonical / integrity-cose; it does not
+# depend on the primitive. The wrapper lists are the direct dependents in this workspace
+# (`cargo tree --workspace -i <crate> --depth 1`); upstream bumps can shift them.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = [
+    { name = "sha2", wrappers = [
+        "ed25519-dalek",
+        "hpke",
+        "integrity-canonical",
+        "integrity-cbor",
+        "integrity-cose",
+        "integrity-hpke",
+    ] },
+    { name = "ed25519-dalek", wrappers = ["integrity-cose"] },
+    { name = "ring", wrappers = ["integrity-signature-ring"] },
+    { name = "hex", wrappers = ["integrity-canonical", "integrity-cose", "integrity-seam"] },
+]

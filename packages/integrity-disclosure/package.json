@@ -1,0 +1,32 @@
+{
+  "name": "@formspec-org/integrity-disclosure",
+  "version": "0.1.0",
+  "description": "RFC 9901 SD-JWT selective disclosure over generic JSON claims, byte-identical to integrity-disclosure Rust",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Formspec-Labs/integrity-stack.git",
+    "directory": "packages/integrity-disclosure"
+  },
+  "engines": { "node": ">=22" },
+  "publishConfig": { "access": "public" },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "sideEffects": false,
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "@formspec-org/integrity-canonical": "^0.1.1" },
+  "devDependencies": {
+    "@owf/identity-common": "0.4.1",
+    "@sd-jwt/core": "0.21.1",
+    "@types/node": "^25.8.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

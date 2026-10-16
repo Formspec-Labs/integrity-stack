@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { canonicalResponseHandoffBytes, canonicalResponseSignedPayloadBytes } from './index.js';
+import { canonicalJsonBytes, canonicalResponseHandoffBytes, canonicalResponseSignedPayloadBytes } from './index.js';
 
 interface Vector {
   name: string;
@@ -137,3 +137,17 @@ for (const produceBytes of [canonicalResponseHandoffBytes, canonicalResponseSign
     });
   });
 }
+
+describe('canonicalJsonBytes generic JCS', () => {
+  it('serializes any JSON root with sorted keys and ES6 numbers, no framing', () => {
+    const text = (value: unknown) => new TextDecoder().decode(canonicalJsonBytes(value));
+    expect(text({ b: 1, a: [1e21, 4.5e-7, -0, 1.0, 9007199254740993] })).toBe('{"a":[1e+21,4.5e-7,0,1,9007199254740992],"b":1}');
+    expect(text('x')).toBe('"x"');
+    expect(text(null)).toBe('null');
+  });
+  it('refuses malformed Unicode and non-JSON values', () => {
+    expect(() => canonicalJsonBytes('\ud800')).toThrow(TypeError);
+    expect(() => canonicalJsonBytes(undefined)).toThrow(TypeError);
+    expect(() => canonicalJsonBytes({ a: 1n })).toThrow(TypeError);
+  });
+});

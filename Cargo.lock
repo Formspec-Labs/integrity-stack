@@ -923,6 +923,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "integrity-disclosure"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "integrity-canonical",
+ "integrity-cose",
+ "integrity-seam",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "integrity-event"
 version = "0.1.0"
 dependencies = [

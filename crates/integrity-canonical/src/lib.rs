@@ -217,13 +217,22 @@ pub fn build_signed_payload(
     })
 }
 
+/// Computes the raw digest bytes for bytes.
+///
+/// Callers that need a non-hex encoding (for example SD-JWT's base64url
+/// digests) take the bytes here instead of depending on a hash crate.
+#[must_use]
+pub fn digest_bytes(bytes: &[u8], algorithm: DigestAlgorithm) -> Vec<u8> {
+    match algorithm {
+        DigestAlgorithm::Sha256 => Sha256::digest(bytes).to_vec(),
+        DigestAlgorithm::Sha384 => Sha384::digest(bytes).to_vec(),
+        DigestAlgorithm::Sha512 => Sha512::digest(bytes).to_vec(),
+    }
+}
+
 /// Computes a lowercase hex digest for bytes.
 pub fn compute_digest(bytes: &[u8], algorithm: DigestAlgorithm) -> String {
-    match algorithm {
-        DigestAlgorithm::Sha256 => hex::encode(Sha256::digest(bytes)),
-        DigestAlgorithm::Sha384 => hex::encode(Sha384::digest(bytes)),
-        DigestAlgorithm::Sha512 => hex::encode(Sha512::digest(bytes)),
-    }
+    hex::encode(digest_bytes(bytes, algorithm))
 }
 
 /// Verifies a Formspec response signed-payload digest.

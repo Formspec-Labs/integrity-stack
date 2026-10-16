@@ -34,6 +34,20 @@ export function canonicalResponseSignedPayloadBytes(response: unknown): Uint8Arr
   return framedBytes(SIGNING_DOMAIN, payload);
 }
 
+/**
+ * Serializes any JSON value with RFC 8785 JCS, matching Rust `canonical_json_bytes`.
+ *
+ * Applies the same admission rules as the Response profiles (no accessors, hooks, cycles, sparse
+ * arrays or malformed Unicode) and adds no domain framing. The root may be any JSON value.
+ *
+ * @throws TypeError for non-JSON runtime values or malformed Unicode.
+ */
+export function canonicalJsonBytes(value: unknown): Uint8Array<ArrayBuffer> {
+  const json = canonicalize(jsonSnapshot(value, new Set()));
+  if (json === undefined) throw new TypeError('value must have a canonical JSON representation');
+  return new TextEncoder().encode(json);
+}
+
 type JsonValue = null | string | boolean | number | JsonValue[] | { [key: string]: JsonValue };
 
 function responseSnapshot(response: unknown): Record<string, JsonValue> {

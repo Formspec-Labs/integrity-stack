@@ -16,6 +16,7 @@ npm, published from this repository under the stack's `@formspec-org` scope:
 | [`@formspec-org/integrity-signature-port`](packages/integrity-signature-port) | The signature verifier port and the verification receipt types every adapter returns. |
 | [`@formspec-org/integrity-cose`](packages/integrity-cose) | COSE_Sign1 byte helpers and method dispatch enforcement. |
 | [`@formspec-org/integrity-signature-adapter-webcrypto`](packages/integrity-signature-adapter-webcrypto) | The port implemented on WebCrypto, for browsers and Node. |
+| [`@formspec-org/integrity-disclosure`](packages/integrity-disclosure) | RFC 9901 SD-JWT selective disclosure: issue, present and verify offline, byte-identical to the `integrity-disclosure` crate. |
 
 Rust crates live under [`crates/`](crates/) (`integrity-*`; see `Cargo.toml` for the workspace members) and
 are consumed by sibling path from the stack checkout. The three `integrity-verify*` crates reach the
