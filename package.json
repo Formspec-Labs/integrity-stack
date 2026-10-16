@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w packages/integrity-canonical -w packages/integrity-cose -w packages/integrity-signature-port -w packages/integrity-signature-adapter-webcrypto",
+    "build": "npm run build -w packages/integrity-canonical -w packages/integrity-cose -w packages/integrity-signature-port -w packages/integrity-signature-adapter-webcrypto -w packages/integrity-disclosure",
     "test": "npm run build && npm run test --workspaces",
     "typecheck": "npm run build && npm run typecheck --workspaces"
   }

@@ -1,6 +1,6 @@
 {
   "name": "@formspec-org/integrity-canonical",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Canonical Response handoff and signing bytes matching integrity-canonical Rust",
   "type": "module",
   "license": "Apache-2.0",

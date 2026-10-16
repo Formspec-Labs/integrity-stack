@@ -34,7 +34,7 @@ jobs:
       - name: Publish, in dependency order, whatever is not on npm yet
         run: |
           set -euo pipefail
-          for dir in integrity-signature-port integrity-cose integrity-signature-adapter-webcrypto; do
+          for dir in integrity-signature-port integrity-cose integrity-signature-adapter-webcrypto integrity-canonical integrity-disclosure; do
             name=$(node -p "require('./packages/$dir/package.json').name")
             local=$(node -p "require('./packages/$dir/package.json').version")
             if npm view "$name@$local" version >/dev/null 2>&1; then
