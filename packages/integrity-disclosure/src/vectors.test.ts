@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import {
-  buildDisclosures, disclosureDigest, issue, present, verify, type ClaimInput, type Encoding, type IssuanceSalts,
-} from './index.js';
+import { REFUSED_CLAIM_NAMES, disclosureDigest, verify, type Encoding } from './index.js';
+import { buildDisclosures, issue, present, type ClaimInput, type IssuanceSalts } from './issue.js';
 import { ISS, KID, TYP, fromHex } from './testkit.js';
 
 interface Vectors {
   typ: string;
+  refusedClaimNames: string[];
   issuer: { iss: string; kid: string; seedHex: string; publicKeyHex: string };
   publicClaims: Record<string, unknown>;
   issue: {
@@ -46,9 +46,9 @@ describe('shared Rust / TS selective-disclosure wire vectors', () => {
       it('rebuilds the committed digests from claims and salts', async () => {
         expect(await buildDisclosures([...claims].reverse(), vector.salts)).toEqual(vector.disclosures);
       });
-      it('presents byte-identical allowlisted subsets', () => {
+      it('presents byte-identical allowlisted subsets', async () => {
         for (const presentation of vector.presentations) {
-          expect(present(vector.jwt, vector.disclosures, presentation.paths)).toBe(presentation.compact);
+          expect(await present(vector.jwt, vector.disclosures, presentation.paths)).toBe(presentation.compact);
         }
       });
     });
@@ -72,6 +72,12 @@ describe('shared Rust / TS selective-disclosure wire vectors', () => {
       }
     });
   }
+});
+
+describe('refused claim names', () => {
+  it('are the same closed list, in the same order, as Rust', () => {
+    expect([...REFUSED_CLAIM_NAMES]).toEqual(vectors.refusedClaimNames);
+  });
 });
 
 describe('RFC 9901 examples', () => {

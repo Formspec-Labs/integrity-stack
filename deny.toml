@@ -3,8 +3,10 @@
 #
 # Hashing, signing and hex encoding live only in the crates named below. A new crate that needs
 # SHA-256, Ed25519 or raw bytes as hex calls integrity-canonical / integrity-cose; it does not
-# depend on the primitive. The wrapper lists are the direct dependents in this workspace
-# (`cargo tree --workspace -i <crate> --depth 1`); upstream bumps can shift them.
+# depend on the primitive. The wrapper lists are the direct dependents across the workspace and the
+# three excluded verification crates (`cargo tree --manifest-path <manifest> -i <crate> --depth 1`);
+# upstream bumps can shift them. `scripts/deny-bans.sh` runs this file over all four manifests; a
+# wrapper that one manifest does not use is only a warning.
 
 [graph]
 targets = [
@@ -23,8 +25,16 @@ deny = [
         "integrity-cbor",
         "integrity-cose",
         "integrity-hpke",
+        # Sibling crates reached only by the excluded verification crates:
+        "trellis-witness-registry",
+        "wos-events",
     ] },
-    { name = "ed25519-dalek", wrappers = ["integrity-cose"] },
+    { name = "ed25519-dalek", wrappers = ["integrity-cose", "integrity-verify", "integrity-verify-cli", "integrity-verify-parity"] },
     { name = "ring", wrappers = ["integrity-signature-ring"] },
-    { name = "hex", wrappers = ["integrity-canonical", "integrity-cose", "integrity-seam"] },
+    { name = "hex", wrappers = [
+        "integrity-canonical",
+        "integrity-cose",
+        "integrity-seam",
+        "trellis-verify-wos",
+    ] },
 ]

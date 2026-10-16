@@ -2,6 +2,7 @@
   "extends": "./tsconfig.json",
   "exclude": [
     "src/**/*.test.ts",
-    "src/testkit.ts"
+    "src/testkit.ts",
+    "src/issue.ts"
   ]
 }

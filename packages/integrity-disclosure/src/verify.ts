@@ -17,7 +17,8 @@ export interface IssuerPin {
 
 /**
  * `pinned`: this stack's profile (JCS header, payload and disclosures, 128-bit salts).
- * `rfc9901`: any RFC 9901 encoding, still limited to flat object-property disclosures.
+ * `rfc9901`: any RFC 9901 encoding, still limited to flat object-property disclosures; values are
+ * normalised, so viewer and CLI paths must use `pinned`.
  */
 export type Encoding = 'pinned' | 'rfc9901';
 
@@ -30,7 +31,10 @@ export interface VerifyOptions {
 export interface DisclosedClaim {
   path: string;
   value: Json;
-  /** JCS text of the value. Show this, never a re-serialization: JCS numbers are IEEE doubles. */
+  /**
+   * JCS text of the value. Show this, never a re-serialization: JCS numbers are IEEE doubles.
+   * Exactly the committed text with `pinned`; a normalisation of the issuer's text with `rfc9901`.
+   */
   valueJcs: string;
 }
 
@@ -106,6 +110,22 @@ async function verifyEd25519(publicKey: Uint8Array, message: Uint8Array, signatu
   }
 }
 
+/** Splits on `~`, or returns null when there are more than `limit` segments. */
+function splitBounded(text: string, limit: number): string[] | null {
+  const parts: string[] = [];
+  let start = 0;
+  for (;;) {
+    const next = text.indexOf('~', start);
+    if (next === -1) {
+      parts.push(text.slice(start));
+      return parts;
+    }
+    if (parts.length + 1 >= limit) return null;
+    parts.push(text.slice(start, next));
+    start = next + 1;
+  }
+}
+
 /** Decodes and shapes one disclosure; the caller has already matched its digest to `_sd`. */
 function parseDisclosure(encoded: string, strict: boolean): DisclosedClaim {
   const bytes = b64uDecode(encoded);
@@ -159,7 +179,11 @@ export async function verify(
   if (!/^[A-Za-z0-9_.~-]*$/.test(presentation)) {
     return fail('malformed_compact', 'presentation has a non-compact character');
   }
-  const [jwt, ...tail] = presentation.split('~');
+  // Bound the work before splitting: at most MAX_DISCLOSURES segments plus the trailing empty one
+  // may follow the JWT.
+  const parts = splitBounded(presentation, MAX_DISCLOSURES + 2);
+  if (parts === null) return fail('input_too_large', 'more disclosures than MAX_DISCLOSURES');
+  const [jwt, ...tail] = parts;
   // `jwt~d1~...~` ends in an empty segment; a non-empty last segment is a key-binding JWT or a
   // missing tilde, and the bearer profile accepts neither.
   if (tail.pop() !== '') return fail('malformed_compact', 'presentation must end with ~');

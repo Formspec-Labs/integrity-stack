@@ -71,5 +71,5 @@ pub use issue::{
 pub use verify::{DisclosedClaim, Encoding, IssuerPin, Verified, VerifyOptions, verify};
 pub use wire::{
     MAX_CLAIMS, MAX_DISCLOSURES, MAX_JSON_DEPTH, MAX_PATH_BYTES, MAX_PRESENTATION_BYTES,
-    MAX_SD_DIGESTS, SALT_BYTES, SD_ALG, disclosure_digest,
+    MAX_SD_DIGESTS, REFUSED_CLAIM_NAMES, SALT_BYTES, SD_ALG, disclosure_digest,
 };

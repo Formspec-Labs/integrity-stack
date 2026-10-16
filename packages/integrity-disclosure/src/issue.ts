@@ -2,9 +2,14 @@ import { fail } from './errors.js';
 import { jwtSdDigests } from './verify.js';
 import {
   MAX_CLAIMS, MAX_ISS_BYTES, MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_PRESENTATION_BYTES, SALT_BYTES, SD_ALG,
-  b64uDecode, b64uEncode, compareUtf8, disclosureDigest, encodeDisclosure, hasOwn, isReservedName, jcs, own,
+  b64uDecode, b64uEncode, compareUtf8, disclosurePath, disclosureDigest, encodeDisclosure, hasOwn, isReservedName, jcs, own,
   scanValue, setOwn, utf8, utf8Text, type Json,
 } from './wire.js';
+
+/**
+ * Test-only issuer: the production issuer is the Rust crate, and this module is excluded from the
+ * published build. It exists to prove the TS encoding is byte-identical to Rust.
+ */
 
 /** JWS `alg` for Ed25519 (RFC 8037). */
 export const ALG_EDDSA = 'EdDSA';
@@ -120,7 +125,7 @@ export async function buildDisclosures(
   const admitted: Json[] = [];
   for (const { path, value } of sorted) {
     if (typeof path !== 'string' || path.length === 0 || utf8(path).length > MAX_PATH_BYTES || isReservedName(path)) {
-      invalid('claim path is empty, too long or reserved');
+      invalid('claim path is empty, too long or a refused name');
     }
     // Round-trip through JCS so only admissible JSON survives; later steps never see accessors.
     const snapshot = JSON.parse(utf8Text(jcsOrInvalid(value), 'malformed_json')) as Json;
@@ -242,17 +247,28 @@ export async function issueWithRandom(
  * `paths` is an allowlist of exact claim paths. Disclosures keep issuance order regardless of the
  * order of `paths`. Output is `<issuer-jwt>~<disclosure>~...~`.
  */
-export function present(issuerJwt: string, disclosures: readonly IssuedDisclosure[], paths: readonly string[]): string {
+export async function present(issuerJwt: string, disclosures: readonly IssuedDisclosure[], paths: readonly string[]): Promise<string> {
   const wanted = new Set<string>();
   for (const path of paths) {
     if (wanted.has(path)) fail('duplicate_path', 'a path is requested twice');
     wanted.add(path);
   }
-  const known = new Set(disclosures.map((d) => d.path));
+  // Path and digest come from `encoded`, never from the struct: a mismatched struct must not be
+  // able to steer the allowlist or the membership check.
+  const derived: { path: string; digest: string; encoded: string }[] = [];
+  for (const disclosure of disclosures) {
+    const path = disclosurePath(disclosure.encoded);
+    const digest = await disclosureDigest(disclosure.encoded);
+    if (path !== disclosure.path || digest !== disclosure.digest) {
+      fail('malformed_disclosure', 'a disclosure struct does not match its encoded form');
+    }
+    derived.push({ path, digest, encoded: disclosure.encoded });
+  }
+  const known = new Set(derived.map((d) => d.path));
   for (const path of wanted) if (!known.has(path)) fail('unknown_path', 'a requested path is not a disclosure');
   const listed = jwtSdDigests(issuerJwt);
   let out = `${issuerJwt}~`;
-  for (const disclosure of disclosures) {
+  for (const disclosure of derived) {
     if (!wanted.has(disclosure.path)) continue;
     if (!listed.has(disclosure.digest)) fail('unknown_digest', 'a disclosure does not belong to this issuer JWT');
     out += `${disclosure.encoded}~`;

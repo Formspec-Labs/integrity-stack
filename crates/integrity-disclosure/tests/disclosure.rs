@@ -21,8 +21,8 @@ use integrity_canonical::canonical_json_bytes;
 use integrity_cose::sign_ed25519;
 use integrity_disclosure::{
     Encoding, ErrorCode, IssuanceSalts, IssueParams, Issued, IssuerPin, MAX_DISCLOSURES,
-    MAX_PRESENTATION_BYTES, SALT_BYTES, VerifyOptions, build_disclosures, disclosure_digest, issue,
-    issue_with_random, padded_digest_count, present, verify,
+    MAX_PRESENTATION_BYTES, REFUSED_CLAIM_NAMES, SALT_BYTES, VerifyOptions, build_disclosures,
+    disclosure_digest, issue, issue_with_random, padded_digest_count, present, verify,
 };
 use integrity_seam::{OsSecureRandom, SecureRandom};
 use serde_json::{Map, Value, json};
@@ -117,8 +117,8 @@ fn claims_a() -> Vec<(String, Value)> {
       ["flag", true],
       ["nothing", null],
       ["list", [1, "a", {"b": []}]],
-      ["__proto__", "proto"],
-      ["constructor", "ctor"],
+      ["toJSON", "proto"],
+      ["prototype", "ctor"],
       ["￿", "bmp-high"],
       ["😀", "astral"]
     ]"#;
@@ -925,6 +925,133 @@ fn rfc_9901_disclosures_verify_in_rfc_mode_once_signed_under_a_pinned_key() {
     );
 }
 
+// ---------------------------------------------------------------- refused names, present, malleability
+
+/// The group order of Ed25519, little endian.
+const GROUP_ORDER_LE: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+];
+
+/// Replaces the signature's S with S + L: the same signature in a non-canonical encoding.
+fn malleate_signature(jwt: &str) -> String {
+    let (head, signature) = jwt.rsplit_once('.').unwrap();
+    let mut bytes = URL_SAFE_NO_PAD.decode(signature).unwrap();
+    let mut carry = 0u16;
+    for (byte, order) in bytes[32..].iter_mut().zip(GROUP_ORDER_LE) {
+        let sum = u16::from(*byte) + u16::from(order) + carry;
+        *byte = (sum & 0xff) as u8;
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0, "S + L fits in 256 bits");
+    format!("{head}.{}", b64(&bytes))
+}
+
+#[test]
+fn a_non_canonical_signature_s_plus_l_is_rejected() {
+    let (issued, _) = issue_a(KID, SEED_1);
+    let forged = malleate_signature(&issued.jwt);
+    assert_ne!(forged, issued.jwt);
+    assert_eq!(
+        code(verify(&format!("{forged}~"), &pins_current(), &pinned())),
+        ErrorCode::BadSignature
+    );
+}
+
+#[test]
+fn every_refused_claim_name_is_refused_at_issue_and_by_the_verifier() {
+    assert!(REFUSED_CLAIM_NAMES.len() > 20);
+    for required in [
+        "exp",
+        "nbf",
+        "sub",
+        "iat",
+        "aud",
+        "jti",
+        "iss",
+        "cnf",
+        "vct",
+        "status",
+        "toString",
+        "valueOf",
+        "hasOwnProperty",
+        "__proto__",
+        "constructor",
+        "_sd",
+        "_sd_alg",
+        "...",
+    ] {
+        assert!(
+            REFUSED_CLAIM_NAMES.contains(&required),
+            "{required} missing"
+        );
+    }
+    let rng = CountingRandom(AtomicU8::new(0));
+    for name in REFUSED_CLAIM_NAMES {
+        let list = vec![((*name).to_owned(), json!("x"))];
+        assert_eq!(
+            code(issue_with_random(&params(KID), &list, &rng, &hex32(SEED_1))),
+            ErrorCode::InvalidClaims,
+            "{name} at issue"
+        );
+        let d = disc(&salt(1), name, &json!("x"));
+        let jwt = crafted(SEED_1, std::slice::from_ref(&d), "");
+        for options in [pinned(), lenient()] {
+            assert_eq!(
+                code(verify(&join(&jwt, &[d.clone()]), &pins_current(), &options)),
+                ErrorCode::ReservedClaimName,
+                "{name} at verify"
+            );
+        }
+    }
+}
+
+#[test]
+fn present_derives_path_and_digest_from_the_encoded_disclosure() {
+    let (issued, _) = issue_a(KID, SEED_1);
+    let ssn = issued
+        .disclosures
+        .iter()
+        .find(|d| d.path == "applicant.ssn_last4")
+        .unwrap()
+        .clone();
+    // A struct that labels the SSN disclosure with an allowed path must not leak it.
+    let mut relabelled = issued.disclosures.clone();
+    let slot = relabelled.iter().position(|d| d.path == "flag").unwrap();
+    relabelled[slot].encoded = ssn.encoded.clone();
+    assert_eq!(
+        code(present(&issued.jwt, &relabelled, &["flag"])),
+        ErrorCode::MalformedDisclosure
+    );
+    // Same for a struct whose digest field is forged to match the issuer JWT.
+    let mut wrong_digest = issued.disclosures.clone();
+    wrong_digest[slot].digest = ssn.digest.clone();
+    assert_eq!(
+        code(present(&issued.jwt, &wrong_digest, &["flag"])),
+        ErrorCode::MalformedDisclosure
+    );
+    // Even when only another path is requested, a corrupt struct is refused outright.
+    assert_eq!(
+        code(present(&issued.jwt, &relabelled, &["applicant.name"])),
+        ErrorCode::MalformedDisclosure
+    );
+}
+
+#[test]
+fn a_flood_of_tilde_segments_is_refused_by_count_before_any_per_segment_work() {
+    let flood = format!(
+        "{}{}",
+        "a.b.c",
+        "~".repeat(10_000_000)
+            .get(..MAX_PRESENTATION_BYTES - 10)
+            .unwrap()
+    );
+    assert_eq!(
+        code(verify(&flood, &pins_current(), &pinned())),
+        ErrorCode::InputTooLarge
+    );
+}
+
 // ---------------------------------------------------------------- cross-language vectors
 
 fn hex(bytes: &[u8]) -> String {
@@ -1000,7 +1127,7 @@ fn build_vectors() -> Value {
                 vec![],
                 vec!["applicant.name"],
                 vec!["household[0].income", "household[1].income"],
-                vec!["__proto__", "\u{ffff}", "\u{1F600}", "constructor"],
+                vec!["toJSON", "\u{ffff}", "\u{1F600}", "prototype"],
                 all_paths(&claims),
             ],
         );
@@ -1285,6 +1412,13 @@ fn build_vectors() -> Value {
         &pins,
         Encoding::Rfc9901,
     ));
+    let malleable = malleate_signature(&a.jwt);
+    rejects.push(verify_case(
+        "non-canonical signature S plus L",
+        format!("{malleable}~"),
+        &pins,
+        Encoding::Pinned,
+    ));
     let mut tampered = a.present(&["flag"]).unwrap().into_bytes();
     let position = a.jwt.rfind('.').unwrap() + 3;
     tampered[position] = if tampered[position] == b'A' {
@@ -1302,6 +1436,7 @@ fn build_vectors() -> Value {
     json!({
         "profile": "integrity-disclosure SD-JWT vectors: Rust-generated, checked by Rust and TypeScript",
         "typ": TYP,
+        "refusedClaimNames": REFUSED_CLAIM_NAMES,
         "issuer": {"iss": ISS, "kid": KID, "seedHex": SEED_1, "publicKeyHex": PK_1},
         "publicClaims": params(KID).public_claims,
         "issue": issuances,

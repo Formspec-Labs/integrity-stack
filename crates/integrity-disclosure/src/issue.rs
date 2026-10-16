@@ -13,8 +13,8 @@ use crate::error::{DisclosureError, ErrorCode, Result};
 use crate::verify::jwt_sd_digests;
 use crate::wire::{
     MAX_CLAIMS, MAX_ISS_BYTES, MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_PRESENTATION_BYTES, SALT_BYTES,
-    SD_ALG, Scan, b64_decode, b64_encode, disclosure_digest, encode_disclosure, is_reserved_name,
-    jcs, scan_value,
+    SD_ALG, Scan, b64_decode, b64_encode, disclosure_digest, disclosure_path, encode_disclosure,
+    is_reserved_name, jcs, scan_value,
 };
 
 /// JWS `alg` for Ed25519 (RFC 8037).
@@ -164,7 +164,7 @@ pub fn build_disclosures(
     }
     for (path, value) in &sorted {
         if path.is_empty() || path.len() > MAX_PATH_BYTES || is_reserved_name(path) {
-            return Err(invalid("claim path is empty, too long or reserved"));
+            return Err(invalid("claim path is empty, too long or a refused name"));
         }
         if scan_value(value, 0) != Scan::Clean {
             return Err(invalid("claim value nests too deeply or uses _sd or ..."));
@@ -335,7 +335,21 @@ pub fn present(
             ));
         }
     }
-    let known: HashSet<&str> = disclosures.iter().map(|d| d.path.as_str()).collect();
+    // Path and digest come from `encoded`, never from the struct: a mismatched struct must not be
+    // able to steer the allowlist or the membership check.
+    let mut derived = Vec::with_capacity(disclosures.len());
+    for disclosure in disclosures {
+        let path = disclosure_path(&disclosure.encoded)?;
+        let digest = disclosure_digest(&disclosure.encoded);
+        if path != disclosure.path || digest != disclosure.digest {
+            return Err(DisclosureError::new(
+                ErrorCode::MalformedDisclosure,
+                "a disclosure struct does not match its encoded form",
+            ));
+        }
+        derived.push((path, digest, disclosure));
+    }
+    let known: HashSet<&str> = derived.iter().map(|(path, _, _)| path.as_str()).collect();
     if wanted.iter().any(|path| !known.contains(path)) {
         return Err(DisclosureError::new(
             ErrorCode::UnknownPath,
@@ -345,11 +359,11 @@ pub fn present(
     let listed = jwt_sd_digests(issuer_jwt)?;
     let mut out = String::from(issuer_jwt);
     out.push('~');
-    for disclosure in disclosures
-        .iter()
-        .filter(|d| wanted.contains(d.path.as_str()))
-    {
-        if !listed.contains(disclosure.digest.as_str()) {
+    for (path, digest, disclosure) in &derived {
+        if !wanted.contains(path.as_str()) {
+            continue;
+        }
+        if !listed.contains(digest.as_str()) {
             return Err(DisclosureError::new(
                 ErrorCode::UnknownDigest,
                 "a disclosure does not belong to this issuer JWT",

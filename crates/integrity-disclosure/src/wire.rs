@@ -168,7 +168,63 @@ pub(crate) fn scan_value(value: &Value, depth: usize) -> Scan {
     }
 }
 
-/// Claim names an object property disclosure may never take (RFC 9901 §4.2.1).
+/// Claim names the issuer refuses and the verifier rejects as disclosure paths.
+///
+/// A closed set, so a respondent-controlled path can never act as structure or as a claim a
+/// standard JWT library interprets:
+/// - RFC 9901 structure: `_sd`, `_sd_alg`, `...`;
+/// - RFC 7519 registered names (`exp`, `nbf`, `sub` and the rest), which libraries such as
+///   sd-jwt-js read as validity claims or the subject, plus `cnf`, `vct` and `status`;
+/// - every `Object.prototype` member, which JavaScript libraries refuse because they test
+///   `key in payload`.
+pub const REFUSED_CLAIM_NAMES: &[&str] = &[
+    "_sd",
+    "_sd_alg",
+    "...",
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "nbf",
+    "iat",
+    "jti",
+    "cnf",
+    "vct",
+    "status",
+    "__proto__",
+    "__defineGetter__",
+    "__defineSetter__",
+    "__lookupGetter__",
+    "__lookupSetter__",
+    "constructor",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+    "toString",
+    "valueOf",
+];
+
 pub(crate) fn is_reserved_name(name: &str) -> bool {
-    matches!(name, "_sd" | "..." | "_sd_alg")
+    REFUSED_CLAIM_NAMES.contains(&name)
+}
+
+/// Reads the claim path out of an encoded disclosure, so callers never trust a stored copy.
+pub(crate) fn disclosure_path(encoded: &str) -> Result<String> {
+    let bytes = b64_decode(encoded)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| DisclosureError::new(ErrorCode::MalformedDisclosure, "not UTF-8"))?;
+    match parse_json(&text)? {
+        Value::Array(items) if items.len() == 3 => match &items[1] {
+            Value::String(path) => Ok(path.clone()),
+            _ => Err(DisclosureError::new(
+                ErrorCode::MalformedDisclosure,
+                "claim name must be a string",
+            )),
+        },
+        _ => Err(DisclosureError::new(
+            ErrorCode::MalformedDisclosure,
+            "disclosure is not [salt, name, value]",
+        )),
+    }
 }

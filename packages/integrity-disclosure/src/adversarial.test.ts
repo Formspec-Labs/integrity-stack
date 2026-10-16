@@ -1,9 +1,9 @@
 /** Properties of issue, present and verify. Test names state the property proved. */
 import { describe, expect, it } from 'vitest';
+import { MAX_DISCLOSURES, MAX_PRESENTATION_BYTES, REFUSED_CLAIM_NAMES, SALT_BYTES, disclosureDigest, verify, type IssuerPin } from './index.js';
 import {
-  MAX_DISCLOSURES, MAX_PRESENTATION_BYTES, SALT_BYTES, buildDisclosures, disclosureDigest, generateSalts, issue,
-  issueWithRandom, osSecureRandom, paddedDigestCount, present, verify, type ClaimInput, type IssueParams, type IssuerPin,
-} from './index.js';
+  buildDisclosures, generateSalts, issue, issueWithRandom, osSecureRandom, paddedDigestCount, present, type ClaimInput, type IssueParams,
+} from './issue.js';
 import { ISS, KID, PK_1, PK_2, SEED_1, SEED_2, TYP, countingRandom, fromHex, headerText, pin, signRaw } from './testkit.js';
 import { b64uDecode, b64uEncode, compareUtf8, utf8 } from './wire.js';
 
@@ -12,7 +12,7 @@ const params = (kid = KID): IssueParams => ({
 });
 const claimsA: ClaimInput[] = [
   ['applicant.name', 'Zoë Müller'], ['applicant.ssn_last4', '1234'], ['household[0].income', 100],
-  ['household[1].income', 42000.5], ['flag', true], ['nothing', null], ['__proto__', 'p'], ['constructor', 'c'],
+  ['household[1].income', 42000.5], ['flag', true], ['nothing', null], ['toJSON', 'p'], ['prototype', 'c'],
 ];
 const pinned = { expectedTyp: TYP, encoding: 'pinned' } as const;
 const lenient = { expectedTyp: TYP, encoding: 'rfc9901' } as const;
@@ -34,14 +34,14 @@ const rejects = (promise: Promise<unknown>, code: string) => expect(promise).rej
 describe('issuing and presenting', () => {
   it('verifies an issued presentation offline against the pinned key', async () => {
     const { issued } = await issueA();
-    const verified = await verify(present(issued.jwt, issued.disclosures, ['applicant.name', 'household[0].income']), pinsNow(), pinned);
+    const verified = await verify(await present(issued.jwt, issued.disclosures, ['applicant.name', 'household[0].income']), pinsNow(), pinned);
     expect(verified.disclosed.map((c) => [c.path, c.valueJcs])).toEqual([['applicant.name', '"Zoë Müller"'], ['household[0].income', '100']]);
     expect(verified.publicClaims).toMatchObject({ accepted_at: '2026-10-16T12:00:00Z' });
   });
 
   it('puts only allowlisted values in the presentation and no aggregate hash', async () => {
     const { issued } = await issueA();
-    const presentation = present(issued.jwt, issued.disclosures, ['applicant.name']);
+    const presentation = await present(issued.jwt, issued.disclosures, ['applicant.name']);
     const [jwt, ...disclosures] = presentation.split('~');
     const text = [...jwt.split('.').slice(0, 2), ...disclosures].map((s) => new TextDecoder().decode(b64uDecode(s))).join('\n');
     for (const withheld of ['1234', '42000.5', 'household', 'ssn_last4']) expect(text).not.toContain(withheld);
@@ -87,10 +87,10 @@ describe('issuing and presenting', () => {
 
   it('refuses an unknown or repeated allowlist path and foreign disclosures', async () => {
     const { issued } = await issueA();
-    expect(() => present(issued.jwt, issued.disclosures, ['nope'])).toThrowError(/unknown_path/);
-    expect(() => present(issued.jwt, issued.disclosures, ['flag', 'flag'])).toThrowError(/duplicate_path/);
+    await rejects(present(issued.jwt, issued.disclosures, ['nope']), 'unknown_path');
+    await rejects(present(issued.jwt, issued.disclosures, ['flag', 'flag']), 'duplicate_path');
     const other = await issueWithRandom(params(), [['flag', false]], fromHex(SEED_1), countingRandom(200));
-    expect(() => present(issued.jwt, other.issued.disclosures, ['flag'])).toThrowError(/unknown_digest/);
+    await rejects(present(issued.jwt, other.issued.disclosures, ['flag']), 'unknown_digest');
   });
 
   it('refuses empty, oversized, duplicate, reserved and hostile claim inputs', async () => {
@@ -141,7 +141,7 @@ describe('adversarial verification', () => {
   it('rejects a wrong iss even when kid and key match', async () => {
     const { issued } = await issueA();
     const wrong = [{ ...pin(KID, PK_1), iss: 'https://formspec.example/t/other/w/main/e/prod' }];
-    await rejects(verify(present(issued.jwt, issued.disclosures, []), wrong, pinned), 'wrong_issuer');
+    await rejects(verify(await present(issued.jwt, issued.disclosures, []), wrong, pinned), 'wrong_issuer');
   });
 
   it('keeps the old kid valid under the old pinned key across a rotation', async () => {
@@ -149,16 +149,16 @@ describe('adversarial verification', () => {
     const newOne = (await issueA('att-2027-01', SEED_2)).issued;
     const pins = [pin('att-2026-10', PK_1), pin('att-2027-01', PK_2)];
     const present1 = (i: typeof oldOne) => present(i.jwt, i.disclosures, ['flag']);
-    await expect(verify(present1(oldOne), pins, pinned)).resolves.toMatchObject({ kid: 'att-2026-10' });
-    await expect(verify(present1(newOne), pins, pinned)).resolves.toMatchObject({ kid: 'att-2027-01' });
-    await rejects(verify(present1(newOne), pins.slice(0, 1), pinned), 'unknown_key');
+    await expect(verify(await present1(oldOne), pins, pinned)).resolves.toMatchObject({ kid: 'att-2026-10' });
+    await expect(verify(await present1(newOne), pins, pinned)).resolves.toMatchObject({ kid: 'att-2027-01' });
+    await rejects(verify(await present1(newOne), pins.slice(0, 1), pinned), 'unknown_key');
     const forged = (await issueA('att-2026-10', SEED_2)).issued;
-    await rejects(verify(present1(forged), pins.slice(0, 1), pinned), 'bad_signature');
+    await rejects(verify(await present1(forged), pins.slice(0, 1), pinned), 'bad_signature');
   });
 
   it('refuses two pins that share a kid', async () => {
     const { issued } = await issueA();
-    await rejects(verify(present(issued.jwt, issued.disclosures, []), [pin(KID, PK_1), pin(KID, PK_2)], pinned), 'ambiguous_pins');
+    await rejects(verify(await present(issued.jwt, issued.disclosures, []), [pin(KID, PK_1), pin(KID, PK_2)], pinned), 'ambiguous_pins');
   });
 
   it('breaks the signature when the signed payload is edited', async () => {
@@ -242,7 +242,7 @@ describe('adversarial verification', () => {
 
   it('fails closed on malformed input of every shape with a DisclosureError only', async () => {
     const { issued } = await issueA();
-    const good = present(issued.jwt, issued.disclosures, ['flag']);
+    const good = await present(issued.jwt, issued.disclosures, ['flag']);
     const inputs = ['', '~', '~~', 'a.b~', 'a.b.c~', 'a.b.c.d~', '..~', 'é~', `${good} `, good.replaceAll('~', '~~')];
     for (let cut = 0; cut < good.length; cut++) inputs.push(good.slice(0, cut));
     for (let i = 0; i < good.length; i += 7) inputs.push(`${good.slice(0, i)}${good[i] === 'A' ? 'B' : 'A'}${good.slice(i + 1)}`);
@@ -261,5 +261,51 @@ describe('adversarial verification', () => {
       const d = b64uEncode(utf8(`["${salt(1)}","a",${valueText}]`));
       await rejects(verify(join(await crafted([d]), [d]), pinsNow(), lenient), 'malformed_json');
     }
+  });
+});
+
+describe('refused names, derived presentation and signature malleability', () => {
+  const GROUP_ORDER_LE = fromHex('edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010');
+
+  it('refuses every refused claim name at issue and at the verifier, in both encodings', async () => {
+    expect(REFUSED_CLAIM_NAMES.length).toBeGreaterThan(20);
+    for (const required of ['exp', 'nbf', 'sub', 'iat', 'aud', 'jti', 'iss', 'cnf', 'vct', 'status', 'toString', 'valueOf', 'hasOwnProperty', '__proto__', 'constructor', '_sd', '_sd_alg', '...']) {
+      expect(REFUSED_CLAIM_NAMES).toContain(required);
+    }
+    for (const name of REFUSED_CLAIM_NAMES) {
+      await rejects(issueWithRandom(params(), [[name, 'x']], fromHex(SEED_1), countingRandom(0)), 'invalid_claims');
+      const d = disc(salt(1), name, 'x');
+      const jwt = await crafted([d]);
+      for (const options of [pinned, lenient]) await rejects(verify(join(jwt, [d]), pinsNow(), options), 'reserved_claim_name');
+    }
+  });
+
+  it('derives path and digest from the encoded disclosure, so a mismatched struct cannot leak', async () => {
+    const { issued } = await issueA();
+    const ssn = issued.disclosures.find((d) => d.path === 'applicant.ssn_last4')!;
+    const slot = issued.disclosures.findIndex((d) => d.path === 'flag');
+    const relabelled = issued.disclosures.map((d, i) => (i === slot ? { ...d, encoded: ssn.encoded } : d));
+    await rejects(present(issued.jwt, relabelled, ['flag']), 'malformed_disclosure');
+    const forgedDigest = issued.disclosures.map((d, i) => (i === slot ? { ...d, digest: ssn.digest } : d));
+    await rejects(present(issued.jwt, forgedDigest, ['flag']), 'malformed_disclosure');
+    await rejects(present(issued.jwt, relabelled, ['applicant.name']), 'malformed_disclosure');
+  });
+
+  it('rejects a non-canonical signature S plus L, which WebCrypto also refuses', async () => {
+    const { issued } = await issueA();
+    const [head, signature] = [issued.jwt.slice(0, issued.jwt.lastIndexOf('.')), issued.jwt.slice(issued.jwt.lastIndexOf('.') + 1)];
+    const bytes = b64uDecode(signature);
+    let carry = 0;
+    for (let i = 0; i < 32; i++) {
+      const sum = bytes[32 + i] + GROUP_ORDER_LE[i] + carry;
+      bytes[32 + i] = sum & 0xff;
+      carry = sum >> 8;
+    }
+    expect(carry).toBe(0);
+    await rejects(verify(`${head}.${b64uEncode(bytes)}~`, pinsNow(), pinned), 'bad_signature');
+  });
+
+  it('refuses a flood of tilde segments by count', async () => {
+    await rejects(verify(`a.b.c${'~'.repeat(MAX_PRESENTATION_BYTES - 10)}`, pinsNow(), pinned), 'input_too_large');
   });
 });

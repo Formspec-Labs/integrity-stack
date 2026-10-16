@@ -22,7 +22,7 @@ jobs:
           tool: cargo-nextest,cargo-deny
       - run: cargo nextest run --workspace --locked
       # Crypto ownership fence (deny.toml): hashing, signing and hex live only in the named crates.
-      - run: cargo deny check bans
+      - run: scripts/deny-bans.sh
 
   npm:
     runs-on: ubuntu-latest

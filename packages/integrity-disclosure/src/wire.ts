@@ -160,8 +160,30 @@ export function scanValue(value: unknown, depth: number): Scan {
   return 'clean';
 }
 
-/** Claim names an object property disclosure may never take (RFC 9901 §4.2.1). */
-export const isReservedName = (name: string): boolean => name === '_sd' || name === '...' || name === '_sd_alg';
+/**
+ * Claim names the issuer refuses and the verifier rejects as disclosure paths. Same list, same
+ * order as Rust `REFUSED_CLAIM_NAMES`; the shared vectors pin the equality.
+ *
+ * A closed set: RFC 9901 structure names, RFC 7519 registered names plus `cnf`, `vct` and
+ * `status` (which libraries such as sd-jwt-js read as validity claims or the subject), and every
+ * `Object.prototype` member (which JavaScript libraries refuse because they test `key in payload`).
+ */
+export const REFUSED_CLAIM_NAMES: readonly string[] = [
+  '_sd', '_sd_alg', '...', 'iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti', 'cnf', 'vct', 'status',
+  '__proto__', '__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__',
+  'constructor', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString', 'toString',
+  'valueOf',
+];
+const refused = new Set(REFUSED_CLAIM_NAMES);
+export const isReservedName = (name: string): boolean => refused.has(name);
+
+/** Reads the claim path out of an encoded disclosure, so callers never trust a stored copy. */
+export function disclosurePath(encoded: string): string {
+  const parsed = parseJson(utf8Text(b64uDecode(encoded), 'malformed_disclosure'));
+  if (!Array.isArray(parsed) || parsed.length !== 3) return fail('malformed_disclosure', 'disclosure is not [salt, name, value]');
+  const path = parsed[1];
+  return typeof path === 'string' ? path : fail('malformed_disclosure', 'claim name must be a string');
+}
 
 export const hasOwn = (object: object, key: string): boolean => Object.prototype.hasOwnProperty.call(object, key);
 

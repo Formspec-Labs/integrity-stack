@@ -32,7 +32,9 @@ pub enum Encoding {
     /// bits. Use for presentations this stack issued.
     Pinned,
     /// Any RFC 9901 encoding (whitespace, key order, any salt length), still restricted to flat
-    /// object-property disclosures. Use for other issuers and for RFC examples.
+    /// object-property disclosures. Use for other issuers and for RFC examples. Values are
+    /// normalised: `value_jcs` is the JCS of the parsed value, not the issuer's original text.
+    /// The viewer and CLI paths must use [`Encoding::Pinned`], where it is the committed text.
     Rfc9901,
 }
 
@@ -53,7 +55,8 @@ pub struct DisclosedClaim {
     /// Parsed value.
     pub value: Value,
     /// JCS text of the value. Show this, never a re-serialization of `value`: JCS numbers are
-    /// IEEE doubles.
+    /// IEEE doubles. With [`Encoding::Pinned`] it is exactly the committed text; with
+    /// [`Encoding::Rfc9901`] it is a normalisation of what the issuer wrote.
     pub value_jcs: String,
 }
 
@@ -163,7 +166,15 @@ pub fn verify(
     }
     let mut segments = presentation.split('~');
     let jwt = segments.next().unwrap_or_default();
-    let mut tail: Vec<&str> = segments.collect();
+    // Bound the work before collecting: at most MAX_DISCLOSURES segments plus the trailing empty
+    // one may follow the JWT.
+    let mut tail: Vec<&str> = segments.by_ref().take(MAX_DISCLOSURES + 1).collect();
+    if segments.next().is_some() {
+        return fail(
+            ErrorCode::InputTooLarge,
+            "more disclosures than MAX_DISCLOSURES",
+        );
+    }
     // `jwt~d1~...~` ends in an empty segment; a non-empty last segment is a key-binding JWT or a
     // missing tilde, and the bearer profile accepts neither.
     if tail.pop() != Some("") {

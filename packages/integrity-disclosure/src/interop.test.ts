@@ -44,13 +44,11 @@ function expectedClaims(publicClaims: unknown, iss: string, disclosed: { path: s
 describe('sd-jwt-js accepts what integrity-disclosure issues and presents', () => {
   it('resolves every Rust-issued presentation to the claims we verify', async () => {
     const instance = await oracle(SEED_1, PK_1);
-    // sd-jwt-js refuses a disclosed name that already exists on the payload object, which includes
-    // inherited `Object.prototype` names such as `__proto__`. Those presentations are left out of
-    // the comparison; this package reads them correctly (see the shared vectors).
+    // No skips: the issuer refuses every name sd-jwt-js would reject or reinterpret (see
+    // REFUSED_CLAIM_NAMES), so every presentation must resolve.
     let compared = 0;
     for (const issuance of vectors.issue) {
       for (const presentation of issuance.presentations) {
-        if (presentation.paths.some((p: string) => p === '__proto__' || p === 'constructor')) continue;
         const ours = await verify(presentation.compact, [pin(KID, PK_1)], { expectedTyp: TYP, encoding: 'pinned' });
         const theirs = await instance.verify(presentation.compact);
         const { _sd_alg: _ignored, ...resolved } = theirs.payload as Record<string, unknown>;
@@ -59,7 +57,7 @@ describe('sd-jwt-js accepts what integrity-disclosure issues and presents', () =
         compared += 1;
       }
     }
-    expect(compared).toBeGreaterThanOrEqual(6);
+    expect(compared).toBe(vectors.issue.reduce((n: number, i: { presentations: unknown[] }) => n + i.presentations.length, 0));
   });
 
   it('rejects the same tampering we reject: a forged value, swapped salt or foreign key', async () => {
