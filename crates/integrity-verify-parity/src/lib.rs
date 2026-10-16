@@ -1,9 +1,21 @@
 // Rust guideline compliant 2026-05-13
 //! Parity harness for the verifier cutover gate.
 //!
-//! This crate runs an independent Trellis Python verifier projection and the
+//! This crate runs the Trellis Python verifier projection and the
 //! target `integrity_verify::trellis` implementation over the same export ZIP
 //! bytes, then compares stable JSON-compatible projections.
+//!
+//! # What the gate does and does not check
+//!
+//! The projection is the structured report only: verdicts, failure kinds and
+//! locations, per-outcome fields (including certificate
+//! `attestation_authority`) and domain findings. Free-text warnings are not
+//! compared. The oracle runs with no external trust registry, so operator
+//! authority is only ever `unchecked` here, never `verified` or `failed`. The
+//! corpus is the committed `trellis/fixtures/vectors` export and tamper ZIPs; it
+//! has no v2 negative cases and no protected external payloads, so those paths
+//! are not covered by this gate. Passing means "agrees on this
+//! corpus", not "the two verifiers are equivalent".
 
 #![forbid(unsafe_code)]
 
@@ -52,7 +64,6 @@ pub struct ReportProjection {
     pub correction_preservations: Vec<CorrectionPreservationProjection>,
     pub interop_sidecars: Vec<InteropSidecarProjection>,
     pub domain_findings: Vec<DomainFindingProjection>,
-    pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub substrate_tier: Option<String>,
 }
@@ -108,6 +119,8 @@ pub struct CertificateProjection {
     pub attachment_resolved: bool,
     pub all_signing_events_resolved: bool,
     pub chain_summary_consistent: bool,
+    /// `unchecked`, `verified` or `failed` (Core §19 step 6c).
+    pub attestation_authority: String,
     pub failures: Vec<String>,
 }
 
@@ -262,6 +275,7 @@ fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> 
             attachment_resolved: outcome.attachment_resolved,
             all_signing_events_resolved: outcome.all_signing_events_resolved,
             chain_summary_consistent: outcome.chain_summary_consistent,
+            attestation_authority: outcome.attestation_authority.as_str().to_owned(),
             failures: outcome.failures.clone(),
         })
         .collect();
@@ -355,7 +369,6 @@ fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> 
                 message: finding.message.clone(),
             })
             .collect(),
-        warnings: trellis.warnings,
         substrate_tier: None,
     }
 }
@@ -373,16 +386,15 @@ fn run_python_oracle(fixture_path: &Path) -> Result<ReportProjection, ParityErro
     let mut command = Command::new("uv");
     command
         .arg("run")
-        .arg("--with")
-        .arg("cbor2")
-        .arg("--with")
-        .arg("cryptography")
+        .arg("--project")
+        .arg(trellis_root.join("trellis-py"))
+        .arg("--frozen")
         .arg("python")
         .arg("-m")
         .arg("trellis_py.parity_oracle")
         .arg(fixture_path)
         .current_dir(&trellis_root)
-        .env("PYTHONPATH", trellis_root.join("trellis-py/src"));
+        .env("UV_PROJECT_ENVIRONMENT", oracle_environment());
 
     let output = command.output().map_err(|error| {
         ParityError::new(format!(
@@ -406,6 +418,17 @@ fn run_python_oracle(fixture_path: &Path) -> Result<ReportProjection, ParityErro
             String::from_utf8_lossy(&output.stdout)
         ))
     })
+}
+
+/// The oracle's own locked environment, kept out of `trellis-py/.venv` so
+/// installing it never disturbs trellis's Python targets.
+fn oracle_environment() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join("target"),
+            PathBuf::from,
+        )
+        .join("parity-oracle-venv")
 }
 
 fn trellis_repo_root() -> PathBuf {

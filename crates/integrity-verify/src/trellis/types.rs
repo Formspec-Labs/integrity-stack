@@ -118,6 +118,18 @@ pub enum CertificateAttestationAuthorityStatus {
     Failed,
 }
 
+impl CertificateAttestationAuthorityStatus {
+    /// The Core `attestation_authority` CDDL literal.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unchecked => "unchecked",
+            Self::Verified => "verified",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// Externally trusted operator key binding for completion certificates only.
 ///
 /// Configure this outside the untrusted export. Append rights, an embedded key
