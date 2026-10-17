@@ -1026,6 +1026,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trellis-core"
+version = "0.1.0"
+dependencies = [
+ "integrity-cose",
+ "integrity-hpke",
+ "trellis-cddl",
+ "trellis-types",
+]
+
+[[package]]
 name = "trellis-export-writer"
 version = "0.1.0"
 dependencies = [
@@ -1036,6 +1046,7 @@ dependencies = [
  "integrity-hpke",
  "serde_json",
  "stack-common-error",
+ "trellis-core",
  "trellis-types",
  "trellis-witness-registry",
 ]
