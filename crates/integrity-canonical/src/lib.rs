@@ -230,6 +230,28 @@ pub fn digest_bytes(bytes: &[u8], algorithm: DigestAlgorithm) -> Vec<u8> {
     }
 }
 
+/// Computes HMAC-SHA-256 (RFC 2104) of `message` under `key`.
+///
+/// A key of any length is accepted. Callers keep their own message framing and tag encoding.
+#[must_use]
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
+        .expect("HMAC-SHA-256 accepts keys of any length");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}
+
+/// Checks an HMAC-SHA-256 tag in constant time.
+#[must_use]
+pub fn verify_hmac_sha256(key: &[u8], message: &[u8], tag: &[u8; 32]) -> bool {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
+        .expect("HMAC-SHA-256 accepts keys of any length");
+    mac.update(message);
+    mac.verify_slice(tag).is_ok()
+}
+
 /// Computes a lowercase hex digest for bytes.
 pub fn compute_digest(bytes: &[u8], algorithm: DigestAlgorithm) -> String {
     hex::encode(digest_bytes(bytes, algorithm))
@@ -254,6 +276,31 @@ pub fn verify_signed_payload_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 4231 test case 2.
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_and_verifies_in_constant_time_api() {
+        let tag = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            hex::encode(tag),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert!(verify_hmac_sha256(
+            b"Jefe",
+            b"what do ya want for nothing?",
+            &tag
+        ));
+        assert!(!verify_hmac_sha256(
+            b"Jefe",
+            b"what do ya want for something?",
+            &tag
+        ));
+        assert!(!verify_hmac_sha256(
+            b"jefe",
+            b"what do ya want for nothing?",
+            &tag
+        ));
+    }
     use serde_json::json;
 
     fn vector_response() -> Value {
@@ -442,9 +489,15 @@ mod handoff_decode_tests {
     fn handoff_bytes_round_trip_and_other_encodings_refuse() {
         let response = serde_json::json!({"id": "r-1", "data": {"b": 2, "a": 1}});
         let bytes = canonical_response_handoff_bytes(&response).unwrap();
-        assert_eq!(parse_canonical_response_handoff_bytes(&bytes).unwrap(), response);
+        assert_eq!(
+            parse_canonical_response_handoff_bytes(&bytes).unwrap(),
+            response
+        );
         // Bare canonical JSON, a foreign domain and non-canonical spacing all refuse.
-        assert!(parse_canonical_response_handoff_bytes(&canonical_json_bytes(&response).unwrap()).is_err());
+        assert!(
+            parse_canonical_response_handoff_bytes(&canonical_json_bytes(&response).unwrap())
+                .is_err()
+        );
         let foreign = domain_separated_canonical_bytes("formspec.other.v1", &response).unwrap();
         assert!(parse_canonical_response_handoff_bytes(&foreign).is_err());
         let mut spaced = RESPONSE_HANDOFF_DOMAIN.as_bytes().to_vec();
