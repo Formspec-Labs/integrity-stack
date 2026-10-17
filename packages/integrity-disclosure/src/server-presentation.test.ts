@@ -1,10 +1,10 @@
 /**
  * Interop proof for a presentation a real formspec-server issued.
  *
- * formspec-server's `a_relying_party_sees_only_the_disclosed_answers` writes the presentation and
- * the agency's published `(iss, kid, key)` to the file named by FORMSPEC_SERVER_PRESENTATION, then
- * runs this file through this package's own runner. Without that variable there is nothing to
- * check, so the suite is skipped; the server test fails if the run does not pass.
+ * Not part of `npm test`: formspec-server's `sd_jwt_js_verifies_what_the_server_presented_and_rejects_a_tampered_disclosure`
+ * writes the presentation and the agency's published `(iss, kid, key)` to the file named by
+ * FORMSPEC_SERVER_PRESENTATION, then runs this file with `vitest.server.config.ts`. Without the
+ * variable the suite fails; it never skips.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -29,8 +29,11 @@ interface ServerPresentation {
 
 const file = process.env.FORMSPEC_SERVER_PRESENTATION;
 
-describe.skipIf(!file)('sd-jwt-js and integrity-disclosure verify what formspec-server presented', () => {
-  const served = (): ServerPresentation => JSON.parse(readFileSync(file as string, 'utf8'));
+describe('sd-jwt-js and integrity-disclosure verify what formspec-server presented', () => {
+  const served = (): ServerPresentation => {
+    if (!file) throw new Error('FORMSPEC_SERVER_PRESENTATION names no server-written fixture');
+    return JSON.parse(readFileSync(file, 'utf8'));
+  };
 
   async function oracle(publicKey: string) {
     const key = await crypto.subtle.importKey('raw', b64uDecode(publicKey), 'Ed25519', false, ['verify']);
