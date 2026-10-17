@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use integrity_bundle::read_stored_zip;
+use trellis_types::merkle::{
+    MerkleHasher, TrellisHasher, prefix_roots, root_from_consistency_proof,
+    root_from_inclusion_proof,
+};
 use trellis_types::{
     ArtifactType, checkpoint_digest, domain_separated_sha256, encode_canonical_cbor_value,
     map_lookup_array, map_lookup_bytes, map_lookup_fixed_bytes, map_lookup_optional_map,
@@ -17,10 +21,7 @@ use crate::trellis::certificate::{
 use crate::trellis::erasure::verify_erasure_evidence_catalog;
 use crate::trellis::interop_sidecar::verify_interop_sidecars;
 use crate::trellis::kinds::{VerificationFailureKind, VerifyErrorKind};
-use crate::trellis::merkle::{
-    digest_path_from_values, merkle_leaf_hash, merkle_root, root_from_consistency_proof,
-    root_from_inclusion_proof,
-};
+use crate::trellis::merkle::digest_path_from_values;
 use crate::trellis::open_clocks::{
     verify_clock_segments, verify_open_clocks, verify_unbound_open_clocks,
 };
@@ -608,9 +609,11 @@ pub(crate) fn verify_export_zip_with_record_validator(
         .collect::<Vec<_>>();
     let leaf_hashes = canonical_hashes
         .iter()
-        .copied()
-        .map(merkle_leaf_hash)
+        .map(|canonical_hash| TrellisHasher.leaf(canonical_hash))
         .collect::<Vec<_>>();
+    // One frontier pass gives the root of every prefix: O(n log n) hashes for all checkpoints and
+    // all consistency proofs, where recomputing each prefix root is O(n^2).
+    let roots_by_tree_size = prefix_roots(&TrellisHasher, &leaf_hashes);
 
     let checkpoints = match archive.members.get("040-checkpoints.cbor") {
         Some(bytes) => match parse_sign1_array(bytes) {
@@ -723,7 +726,7 @@ pub(crate) fn verify_export_zip_with_record_validator(
             continue;
         }
 
-        let expected_root = merkle_root(&leaf_hashes[..tree_size]);
+        let expected_root = roots_by_tree_size[tree_size - 1];
         let actual_root = match map_lookup_fixed_bytes(payload_map, "tree_head_hash", 32) {
             Ok(bytes) => bytes_array(&bytes),
             Err(error) => {
@@ -876,6 +879,7 @@ pub(crate) fn verify_export_zip_with_record_validator(
             };
             let matches_leaf = leaf_hash == leaf_hashes[leaf_index];
             let matches_root = root_from_inclusion_proof(
+                &TrellisHasher,
                 leaf_index as u64,
                 tree_size as u64,
                 leaf_hash,
@@ -957,9 +961,10 @@ pub(crate) fn verify_export_zip_with_record_validator(
                     continue;
                 }
             };
-            let root_old = merkle_root(&leaf_hashes[..from_tree_size]);
-            let root_new = merkle_root(&leaf_hashes[..to_tree_size]);
+            let root_old = roots_by_tree_size[from_tree_size - 1];
+            let root_new = roots_by_tree_size[to_tree_size - 1];
             match root_from_consistency_proof(
+                &TrellisHasher,
                 from_tree_size as u64,
                 to_tree_size as u64,
                 root_old,

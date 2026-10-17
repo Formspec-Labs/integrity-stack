@@ -73,6 +73,7 @@ pub(crate) mod supersession;
 pub(crate) mod open_clocks;
 
 pub(crate) mod export;
+pub mod pinned;
 
 pub(crate) mod util;
 
@@ -102,10 +103,6 @@ pub use validator::{
 const SUITE_ID_PHASE_1_I128: i128 = SUITE_ID_PHASE_1 as i128;
 
 const ALG_EDDSA: i128 = -8;
-
-const MERKLE_LEAF_DOMAIN: &str = "trellis-merkle-leaf-v1";
-
-const MERKLE_INTERIOR_DOMAIN: &str = "trellis-merkle-interior-v1";
 
 const POSTURE_DECLARATION_DOMAIN: &str = "trellis-posture-declaration-v1";
 
