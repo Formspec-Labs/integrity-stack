@@ -20,8 +20,10 @@ use integrity_cbor::{
 use sha2::{Digest, Sha256};
 
 mod default_async_sign;
+mod key_file;
 
 pub use default_async_sign::default_async_sign;
+pub use key_file::KeyFileSigner;
 
 /// COSE algorithm protected-header label.
 pub const COSE_LABEL_ALG: i128 = 1;
