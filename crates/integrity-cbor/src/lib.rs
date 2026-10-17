@@ -160,10 +160,15 @@ pub fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// Decodes `bytes` as a single CBOR value.
+/// Decodes `bytes` as a single CBOR value whose maps never repeat a key.
+///
+/// Canonical CBOR profile rule R4 makes a repeated map key a decode failure at
+/// any depth: readers that keep the first copy and readers that keep the last
+/// would otherwise see different content in the same bytes.
 ///
 /// # Errors
-/// Returns an error if `bytes` is not exactly one decodable CBOR value.
+/// Returns an error if `bytes` is not exactly one decodable CBOR value, or if
+/// any map at any depth carries the same canonical-encoded key twice.
 pub fn decode_cbor_value(bytes: &[u8]) -> Result<Value, CborHelperError> {
     let mut reader = bytes;
     let value = ciborium::from_reader(&mut reader)
@@ -173,7 +178,39 @@ pub fn decode_cbor_value(bytes: &[u8]) -> Result<Value, CborHelperError> {
             "trailing bytes after CBOR value".to_owned(),
         ));
     }
+    reject_duplicate_map_keys(&value)?;
     Ok(value)
+}
+
+/// Refuses a value whose maps repeat a canonical-encoded key at any depth (R4).
+fn reject_duplicate_map_keys(value: &Value) -> Result<(), CborHelperError> {
+    match value {
+        Value::Array(items) => items.iter().try_for_each(reject_duplicate_map_keys),
+        Value::Map(entries) => {
+            let mut keys = entries
+                .iter()
+                .map(|(key, value)| {
+                    reject_duplicate_map_keys(key)?;
+                    reject_duplicate_map_keys(value)?;
+                    encoded_cbor_key_bytes(&canonicalize_cbor_value(key)?)
+                })
+                .collect::<Result<Vec<_>, CborHelperError>>()?;
+            keys.sort_unstable();
+            match keys.windows(2).find(|pair| pair[0] == pair[1]) {
+                Some(pair) => Err(duplicate_key_error(&pair[0])),
+                None => Ok(()),
+            }
+        }
+        Value::Tag(_, item) => reject_duplicate_map_keys(item),
+        _ => Ok(()),
+    }
+}
+
+fn duplicate_key_error(encoded_key: &[u8]) -> CborHelperError {
+    CborHelperError(format!(
+        "duplicate canonical CBOR map key `{}`",
+        hex_lower(encoded_key)
+    ))
 }
 
 /// Recursively sorts CBOR map entries by encoded key bytes.
@@ -201,15 +238,8 @@ pub fn canonicalize_cbor_value(value: &Value) -> Result<Value, CborHelperError> 
                 })
                 .collect::<Result<Vec<_>, CborHelperError>>()?;
             entries.sort_by(|left, right| left.0.cmp(&right.0));
-            if let Some((duplicate_key, _, _)) = entries
-                .windows(2)
-                .find(|pair| pair[0].0 == pair[1].0)
-                .map(|pair| &pair[1])
-            {
-                return Err(CborHelperError(format!(
-                    "duplicate canonical CBOR map key `{}`",
-                    hex_lower(duplicate_key)
-                )));
+            if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+                return Err(duplicate_key_error(&pair[1].0));
             }
             Ok(Value::Map(
                 entries
@@ -770,6 +800,30 @@ mod tests {
             err.to_string().contains("trailing bytes"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn decode_cbor_value_refuses_a_repeated_map_key_at_any_depth() {
+        // {"a": 1, "a": 2}: the outer map repeats `a`.
+        let outer = [0xa2, 0x61, b'a', 0x01, 0x61, b'a', 0x02];
+        // [{"k": {"a": 1, "a": 2}}]: the repeat sits two containers down.
+        let nested = [
+            0x81, 0xa1, 0x61, b'k', 0xa2, 0x61, b'a', 0x01, 0x61, b'a', 0x02,
+        ];
+        // {1: "x", 0x18 0x01: "y"}: a non-minimal integer key is still key 1.
+        let widened = [0xa2, 0x01, 0x61, b'x', 0x18, 0x01, 0x61, b'y'];
+        for bytes in [&outer[..], &nested[..], &widened[..]] {
+            let error = decode_cbor_value(bytes).expect_err("repeated key refuses");
+            assert!(
+                error
+                    .to_string()
+                    .contains("duplicate canonical CBOR map key"),
+                "unexpected error: {error}"
+            );
+        }
+        // Distinct keys of different types still decode.
+        let distinct = [0xa2, 0x01, 0x61, b'x', 0x61, b'1', 0x61, b'y'];
+        assert!(decode_cbor_value(&distinct).is_ok());
     }
 
     #[test]

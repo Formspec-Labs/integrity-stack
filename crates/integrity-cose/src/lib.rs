@@ -7,10 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{
-    collections::HashSet,
-    fmt::{Display, Formatter},
-};
+use std::fmt::{Display, Formatter};
 
 use ed25519_dalek::ed25519::signature::Verifier;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -224,7 +221,6 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
     let protected_map = protected_value
         .as_map()
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
-    reject_duplicate_integer_labels(protected_map)?;
     reject_retired_dispatch_label(protected_map)?;
     reject_over_cap_method_uri(protected_map)?;
 
@@ -332,14 +328,13 @@ pub struct ProtectedHeader {
 /// # Errors
 /// Returns an error when bytes are not a CBOR map, when `alg` is absent or
 /// non-integer, when an integer label appears with the wrong value type, or
-/// when integer labels duplicate within the map.
+/// when the map repeats a label (the shared CBOR decoder refuses repeats).
 pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseError> {
     let value = decode_cbor_value(bytes)
         .map_err(|error| CoseError::new(format!("failed to decode protected header: {error}")))?;
     let map = value
         .as_map()
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
-    reject_duplicate_integer_labels(map)?;
     reject_retired_dispatch_label(map)?;
 
     let alg = integer_label_i128(map, COSE_LABEL_ALG)?
@@ -359,21 +354,6 @@ pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseErro
         artifact_type,
         method_uri,
     })
-}
-
-fn reject_duplicate_integer_labels(map: &[(Value, Value)]) -> Result<(), CoseError> {
-    let mut seen = HashSet::new();
-    for (key, _) in map {
-        let Some(integer) = key.as_integer().map(i128::from) else {
-            continue;
-        };
-        if !seen.insert(integer) {
-            return Err(CoseError::new(format!(
-                "duplicate protected-header label {integer}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn reject_retired_dispatch_label(map: &[(Value, Value)]) -> Result<(), CoseError> {
@@ -744,7 +724,8 @@ mod tests {
         let bytes = super::encode_cose_sign1(&protected, None, &[4, 5, 6]);
         let err = decode_cose_sign1(&bytes).expect_err("duplicate labels must reject");
         assert!(
-            err.to_string().contains("duplicate protected-header label"),
+            err.to_string()
+                .contains("duplicate canonical CBOR map key `01`"),
             "unexpected error: {err}"
         );
     }
