@@ -84,7 +84,7 @@ fn parse(purpose: Purpose, bytes: &[u8]) -> Result<PurposeKey, SignError> {
 }
 
 impl KeyFileSigner {
-    /// Builds a signer from key-file contents, one entry per purpose.
+    /// Builds a signer from key-file contents, one entry per purpose, and zeroizes the contents.
     ///
     /// # Errors
     /// Fails on a malformed file, a duplicate purpose, or one public key shared by two purposes.
@@ -92,8 +92,11 @@ impl KeyFileSigner {
         entries: impl IntoIterator<Item = (Purpose, Vec<u8>)>,
     ) -> Result<Self, SignError> {
         let mut keys = BTreeMap::new();
-        for (purpose, bytes) in entries {
-            if keys.insert(purpose, parse(purpose, &bytes)?).is_some() {
+        for (purpose, mut bytes) in entries {
+            let parsed = parse(purpose, &bytes);
+            // The raw file contents held a seed: wipe them whether or not they parsed.
+            bytes.zeroize();
+            if keys.insert(purpose, parsed?).is_some() {
                 return Err(SignError::InvalidKey(format!("{purpose} key given twice")));
             }
         }

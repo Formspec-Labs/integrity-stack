@@ -139,18 +139,20 @@ impl Issued {
     }
 }
 
-/// Builds every claim's disclosure from claims and stored salts, sorted by path.
+/// Checks that `claims` can be issued, without drawing salts or building anything.
 ///
-/// Call this at request time to rebuild disclosures without the signing key.
+/// This is the claim half of [`build_disclosures`]: the count is within `MAX_CLAIMS`, paths are
+/// unique, non-empty, within `MAX_PATH_BYTES` and not refused names, and values nest within
+/// bounds. A caller that only needs to know whether claims are issuable uses this.
 ///
 /// # Errors
 ///
-/// Fails when the claims are empty, too many, duplicated, have a malformed path or a value that
-/// cannot be carried, or the salts do not match the claims exactly.
-pub fn build_disclosures(
-    claims: &[(String, Value)],
-    salts: &IssuanceSalts,
-) -> Result<Vec<IssuedDisclosure>> {
+/// Fails with `InvalidClaims` when any of those rules is broken.
+pub fn check_claims(claims: &[(String, Value)]) -> Result<()> {
+    sorted_claims(claims).map(|_| ())
+}
+
+fn sorted_claims(claims: &[(String, Value)]) -> Result<Vec<&(String, Value)>> {
     let invalid = |message: &str| DisclosureError::new(ErrorCode::InvalidClaims, message);
     if claims.is_empty() || claims.len() > MAX_CLAIMS {
         return Err(invalid("claim count must be between 1 and MAX_CLAIMS"));
@@ -170,6 +172,22 @@ pub fn build_disclosures(
             return Err(invalid("claim value nests too deeply or uses _sd or ..."));
         }
     }
+    Ok(sorted)
+}
+
+/// Builds every claim's disclosure from claims and stored salts, sorted by path.
+///
+/// Call this at request time to rebuild disclosures without the signing key.
+///
+/// # Errors
+///
+/// Fails when the claims are empty, too many, duplicated, have a malformed path or a value that
+/// cannot be carried, or the salts do not match the claims exactly.
+pub fn build_disclosures(
+    claims: &[(String, Value)],
+    salts: &IssuanceSalts,
+) -> Result<Vec<IssuedDisclosure>> {
+    let sorted = sorted_claims(claims)?;
     if salts.claims.len() != sorted.len()
         || salts.decoys.len() != padded_digest_count(sorted.len()) - sorted.len()
     {
