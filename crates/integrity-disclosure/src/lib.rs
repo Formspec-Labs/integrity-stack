@@ -65,8 +65,8 @@ mod wire;
 
 pub use error::{DisclosureError, ErrorCode, Result};
 pub use issue::{
-    IssuanceSalts, IssueParams, Issued, IssuedDisclosure, build_disclosures, issue,
-    issue_with_random, padded_digest_count, present,
+    IssuanceSalts, IssueParams, Issued, IssuedDisclosure, PreparedIssue, build_disclosures,
+    check_claims, issue, issue_with_random, padded_digest_count, prepare, present,
 };
 pub use verify::{DisclosedClaim, Encoding, IssuerPin, Verified, VerifyOptions, verify};
 pub use wire::{

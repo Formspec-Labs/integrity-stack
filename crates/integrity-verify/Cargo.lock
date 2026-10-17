@@ -516,6 +516,7 @@ name = "integrity-canonical"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "hmac",
  "serde_json",
  "serde_json_canonicalizer",
  "sha2",
@@ -535,12 +536,14 @@ dependencies = [
 name = "integrity-cose"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "ed25519-dalek",
  "hex",
  "integrity-cbor",
  "integrity-seam",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]

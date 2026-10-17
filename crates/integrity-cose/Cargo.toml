@@ -6,12 +6,14 @@ license.workspace = true
 description = "Shared COSE_Sign1 byte primitives for integrity profiles"
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 ed25519-dalek = "2.1"
 hex = "0.4"
 integrity-cbor = { path = "../integrity-cbor" }
 integrity-seam = { path = "../integrity-seam" }
 sha2 = "0.10"
+zeroize = "1"
 
 [dev-dependencies]
 proptest = "1"

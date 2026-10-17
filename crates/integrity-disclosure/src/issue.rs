@@ -139,18 +139,20 @@ impl Issued {
     }
 }
 
-/// Builds every claim's disclosure from claims and stored salts, sorted by path.
+/// Checks that `claims` can be issued, without drawing salts or building anything.
 ///
-/// Call this at request time to rebuild disclosures without the signing key.
+/// This is the claim half of [`build_disclosures`]: the count is within `MAX_CLAIMS`, paths are
+/// unique, non-empty, within `MAX_PATH_BYTES` and not refused names, and values nest within
+/// bounds. A caller that only needs to know whether claims are issuable uses this.
 ///
 /// # Errors
 ///
-/// Fails when the claims are empty, too many, duplicated, have a malformed path or a value that
-/// cannot be carried, or the salts do not match the claims exactly.
-pub fn build_disclosures(
-    claims: &[(String, Value)],
-    salts: &IssuanceSalts,
-) -> Result<Vec<IssuedDisclosure>> {
+/// Fails with `InvalidClaims` when any of those rules is broken.
+pub fn check_claims(claims: &[(String, Value)]) -> Result<()> {
+    sorted_claims(claims).map(|_| ())
+}
+
+fn sorted_claims(claims: &[(String, Value)]) -> Result<Vec<&(String, Value)>> {
     let invalid = |message: &str| DisclosureError::new(ErrorCode::InvalidClaims, message);
     if claims.is_empty() || claims.len() > MAX_CLAIMS {
         return Err(invalid("claim count must be between 1 and MAX_CLAIMS"));
@@ -170,6 +172,22 @@ pub fn build_disclosures(
             return Err(invalid("claim value nests too deeply or uses _sd or ..."));
         }
     }
+    Ok(sorted)
+}
+
+/// Builds every claim's disclosure from claims and stored salts, sorted by path.
+///
+/// Call this at request time to rebuild disclosures without the signing key.
+///
+/// # Errors
+///
+/// Fails when the claims are empty, too many, duplicated, have a malformed path or a value that
+/// cannot be carried, or the salts do not match the claims exactly.
+pub fn build_disclosures(
+    claims: &[(String, Value)],
+    salts: &IssuanceSalts,
+) -> Result<Vec<IssuedDisclosure>> {
+    let sorted = sorted_claims(claims)?;
     if salts.claims.len() != sorted.len()
         || salts.decoys.len() != padded_digest_count(sorted.len()) - sorted.len()
     {
@@ -212,6 +230,69 @@ pub fn issue(
     salts: &IssuanceSalts,
     signing_seed: &[u8; 32],
 ) -> Result<Issued> {
+    let prepared = prepare(params, claims, salts)?;
+    let signature = sign_ed25519(*signing_seed, prepared.signing_input());
+    prepared.assemble(&signature)
+}
+
+/// An issuer JWT ready to sign: its signing input and the disclosures it commits to.
+///
+/// Signing is the caller's step, so a key held behind an async port (KMS, Vault) can sign without
+/// this crate depending on that port. [`PreparedIssue::assemble`] finishes the SD-JWT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedIssue {
+    signing_input: String,
+    disclosures: Vec<IssuedDisclosure>,
+}
+
+impl PreparedIssue {
+    /// The bytes to sign: `b64(header).b64(payload)`. The header already names `params.kid`.
+    #[must_use]
+    pub fn signing_input(&self) -> &[u8] {
+        self.signing_input.as_bytes()
+    }
+
+    /// Appends the Ed25519 `signature` over [`Self::signing_input`] and returns the SD-JWT.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the result would exceed `MAX_PRESENTATION_BYTES`.
+    pub fn assemble(self, signature: &[u8; 64]) -> Result<Issued> {
+        let jwt = format!("{}.{}", self.signing_input, b64_encode(signature));
+        let total: usize = jwt.len()
+            + self
+                .disclosures
+                .iter()
+                .map(|d| d.encoded.len() + 1)
+                .sum::<usize>()
+            + 1;
+        if total > MAX_PRESENTATION_BYTES {
+            return Err(DisclosureError::new(
+                ErrorCode::InputTooLarge,
+                "issued SD-JWT exceeds MAX_PRESENTATION_BYTES",
+            ));
+        }
+        Ok(Issued {
+            jwt,
+            disclosures: self.disclosures,
+        })
+    }
+}
+
+/// Builds the issuer JWT's signing input and disclosures without signing.
+///
+/// `params.kid` goes into the header, so the caller learns the signing key's `kid` first and
+/// checks that the signature it obtains was made under that key. Output is deterministic for the
+/// same parameters, claims and salts.
+///
+/// # Errors
+///
+/// Fails when parameters, claims or salts are malformed.
+pub fn prepare(
+    params: &IssueParams,
+    claims: &[(String, Value)],
+    salts: &IssuanceSalts,
+) -> Result<PreparedIssue> {
     check_params(params)?;
     let disclosures = build_disclosures(claims, salts)?;
     if disclosures
@@ -253,22 +334,10 @@ pub fn issue(
         b64_encode(&jcs(&Value::Object(header))?),
         b64_encode(&jcs(&Value::Object(payload))?)
     );
-    let signature = sign_ed25519(*signing_seed, signing_input.as_bytes());
-    let jwt = format!("{signing_input}.{}", b64_encode(&signature));
-
-    let total: usize = jwt.len()
-        + disclosures
-            .iter()
-            .map(|d| d.encoded.len() + 1)
-            .sum::<usize>()
-        + 1;
-    if total > MAX_PRESENTATION_BYTES {
-        return Err(DisclosureError::new(
-            ErrorCode::InputTooLarge,
-            "issued SD-JWT exceeds MAX_PRESENTATION_BYTES",
-        ));
-    }
-    Ok(Issued { jwt, disclosures })
+    Ok(PreparedIssue {
+        signing_input,
+        disclosures,
+    })
 }
 
 /// Issues with fresh random salts and returns them for storage.

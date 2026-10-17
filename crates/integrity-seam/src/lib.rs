@@ -6,9 +6,12 @@
 //! code. Later tasks add the byte-building and async sealing traits on the same
 //! public surface.
 
+pub mod purpose;
 pub mod random;
 pub mod seam;
 
+#[doc(inline)]
+pub use purpose::{PublicKeyInfo, Purpose, PurposeKeys, PurposeSigner, SignError, Signed};
 #[doc(inline)]
 pub use random::{OsSecureRandom, SecureRandom};
 #[doc(inline)]
