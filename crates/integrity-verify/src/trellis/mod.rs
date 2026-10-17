@@ -73,6 +73,7 @@ pub(crate) mod supersession;
 pub(crate) mod open_clocks;
 
 pub(crate) mod export;
+pub mod pinned;
 
 pub(crate) mod util;
 
