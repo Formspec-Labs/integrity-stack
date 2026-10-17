@@ -54,7 +54,7 @@ describe('sd-jwt-js and integrity-disclosure verify what formspec-server present
     expect(theirs.header).toMatchObject({ alg: 'EdDSA', kid: s.kid, typ: s.typ });
     expect(resolved.iss).toBe(s.iss);
     for (const [path, jcs] of Object.entries(s.disclosed)) expect(JSON.stringify(resolved[path])).toBe(jcs);
-    for (const path of s.hiddenPaths) expect(resolved).not.toHaveProperty(path);
+    for (const path of s.hiddenPaths) expect(Object.keys(resolved)).not.toContain(path);
     expect(s.hiddenPaths.length).toBeGreaterThan(0);
 
     // Neither the compact text nor any decoded disclosure carries a withheld value or path.
