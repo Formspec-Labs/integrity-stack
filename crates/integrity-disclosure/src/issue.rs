@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use integrity_cose::sign_ed25519;
-use integrity_seam::{Purpose, PurposeSigner, SecureRandom};
+use integrity_seam::SecureRandom;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -212,48 +212,69 @@ pub fn issue(
     salts: &IssuanceSalts,
     signing_seed: &[u8; 32],
 ) -> Result<Issued> {
-    issue_with(params, claims, salts, |signing_input| {
-        Ok(sign_ed25519(*signing_seed, signing_input))
-    })
+    let prepared = prepare(params, claims, salts)?;
+    let signature = sign_ed25519(*signing_seed, prepared.signing_input());
+    prepared.assemble(&signature)
 }
 
-/// Issues an SD-JWT whose issuer JWT is signed by the `purpose` key of a [`PurposeSigner`].
+/// An issuer JWT ready to sign: its signing input and the disclosures it commits to.
 ///
-/// `params.kid` must be the signer's current `kid` for `purpose` (see [`PurposeSigner::keys`]):
-/// the header is built before signing, and a signature made under any other key is refused.
-/// Everything else is as [`issue`], so the same salts and claims give byte-identical output.
+/// Signing is the caller's step, so a key held behind an async port (KMS, Vault) can sign without
+/// this crate depending on that port. [`PreparedIssue::assemble`] finishes the SD-JWT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedIssue {
+    signing_input: String,
+    disclosures: Vec<IssuedDisclosure>,
+}
+
+impl PreparedIssue {
+    /// The bytes to sign: `b64(header).b64(payload)`. The header already names `params.kid`.
+    #[must_use]
+    pub fn signing_input(&self) -> &[u8] {
+        self.signing_input.as_bytes()
+    }
+
+    /// Appends the Ed25519 `signature` over [`Self::signing_input`] and returns the SD-JWT.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the result would exceed `MAX_PRESENTATION_BYTES`.
+    pub fn assemble(self, signature: &[u8; 64]) -> Result<Issued> {
+        let jwt = format!("{}.{}", self.signing_input, b64_encode(signature));
+        let total: usize = jwt.len()
+            + self
+                .disclosures
+                .iter()
+                .map(|d| d.encoded.len() + 1)
+                .sum::<usize>()
+            + 1;
+        if total > MAX_PRESENTATION_BYTES {
+            return Err(DisclosureError::new(
+                ErrorCode::InputTooLarge,
+                "issued SD-JWT exceeds MAX_PRESENTATION_BYTES",
+            ));
+        }
+        Ok(Issued {
+            jwt,
+            disclosures: self.disclosures,
+        })
+    }
+}
+
+/// Builds the issuer JWT's signing input and disclosures without signing.
+///
+/// `params.kid` goes into the header, so the caller learns the signing key's `kid` first and
+/// checks that the signature it obtains was made under that key. Output is deterministic for the
+/// same parameters, claims and salts.
 ///
 /// # Errors
 ///
-/// As [`issue`], and when the signer fails or signs under a `kid` other than `params.kid`.
-pub fn issue_signed(
+/// Fails when parameters, claims or salts are malformed.
+pub fn prepare(
     params: &IssueParams,
     claims: &[(String, Value)],
     salts: &IssuanceSalts,
-    signer: &dyn PurposeSigner,
-    scope_key: &[u8; 32],
-    purpose: Purpose,
-) -> Result<Issued> {
-    issue_with(params, claims, salts, |signing_input| {
-        let signed = signer
-            .sign(scope_key, purpose, signing_input)
-            .map_err(|_| DisclosureError::new(ErrorCode::Signer, "the signer failed"))?;
-        if signed.kid != params.kid {
-            return Err(DisclosureError::new(
-                ErrorCode::Signer,
-                "the signer used a key other than params.kid",
-            ));
-        }
-        Ok(signed.signature)
-    })
-}
-
-fn issue_with(
-    params: &IssueParams,
-    claims: &[(String, Value)],
-    salts: &IssuanceSalts,
-    sign: impl FnOnce(&[u8]) -> Result<[u8; 64]>,
-) -> Result<Issued> {
+) -> Result<PreparedIssue> {
     check_params(params)?;
     let disclosures = build_disclosures(claims, salts)?;
     if disclosures
@@ -295,22 +316,10 @@ fn issue_with(
         b64_encode(&jcs(&Value::Object(header))?),
         b64_encode(&jcs(&Value::Object(payload))?)
     );
-    let signature = sign(signing_input.as_bytes())?;
-    let jwt = format!("{signing_input}.{}", b64_encode(&signature));
-
-    let total: usize = jwt.len()
-        + disclosures
-            .iter()
-            .map(|d| d.encoded.len() + 1)
-            .sum::<usize>()
-        + 1;
-    if total > MAX_PRESENTATION_BYTES {
-        return Err(DisclosureError::new(
-            ErrorCode::InputTooLarge,
-            "issued SD-JWT exceeds MAX_PRESENTATION_BYTES",
-        ));
-    }
-    Ok(Issued { jwt, disclosures })
+    Ok(PreparedIssue {
+        signing_input,
+        disclosures,
+    })
 }
 
 /// Issues with fresh random salts and returns them for storage.

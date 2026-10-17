@@ -16,3 +16,6 @@ integrity-cose = { path = "../integrity-cose" }
 integrity-seam = { path = "../integrity-seam" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

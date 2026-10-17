@@ -5,21 +5,26 @@
 //! One file per purpose, read from the secrets store. The file holds the current Ed25519 seed
 //! as 32 raw bytes, optionally followed by the previous public key as 32 raw bytes, so a
 //! rotation publishes the next key beside the current one. Any other length is refused.
+//!
+//! This adapter takes file contents, not paths: the caller reads the file with an owner-only
+//! check (`stack_common_private_file::read_private_file`), as WOS and Trellis do.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::Path;
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use async_trait::async_trait;
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use integrity_seam::{PublicKeyInfo, Purpose, PurposeKeys, PurposeSigner, SignError, Signed};
+use zeroize::Zeroize;
 
-use crate::{SUITE_ID_PHASE_1, derive_kid, sign_ed25519};
+use crate::{SUITE_ID_PHASE_1, derive_kid};
 
 const SEED_BYTES: usize = 32;
 const PUBLIC_KEY_BYTES: usize = 32;
 
 struct PurposeKey {
-    seed: [u8; SEED_BYTES],
+    /// Zeroized when dropped.
+    key: SigningKey,
     current: PublicKeyInfo,
     previous: Option<PublicKeyInfo>,
 }
@@ -55,8 +60,10 @@ fn parse(purpose: Purpose, bytes: &[u8]) -> Result<PurposeKey, SignError> {
         }
         _ => return Err(invalid("must hold 32 or 64 raw bytes")),
     };
-    let seed: [u8; SEED_BYTES] = seed.try_into().map_err(|_| invalid("seed is malformed"))?;
-    let current = info(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    let mut seed: [u8; SEED_BYTES] = seed.try_into().map_err(|_| invalid("seed is malformed"))?;
+    let key = SigningKey::from_bytes(&seed);
+    seed.zeroize();
+    let current = info(key.verifying_key().to_bytes());
     let previous = previous
         .map(|raw| {
             let raw: [u8; PUBLIC_KEY_BYTES] = raw
@@ -70,7 +77,7 @@ fn parse(purpose: Purpose, bytes: &[u8]) -> Result<PurposeKey, SignError> {
         })
         .transpose()?;
     Ok(PurposeKey {
-        seed,
+        key,
         current,
         previous,
     })
@@ -105,27 +112,14 @@ impl KeyFileSigner {
         Ok(Self { keys })
     }
 
-    /// Reads each purpose's key file from the secrets store.
-    ///
-    /// # Errors
-    /// Fails when a file is unreadable, or on any error of [`Self::from_key_bytes`].
-    pub fn from_key_files(entries: &[(Purpose, &Path)]) -> Result<Self, SignError> {
-        let mut read = Vec::with_capacity(entries.len());
-        for (purpose, path) in entries {
-            let bytes = std::fs::read(path)
-                .map_err(|_| SignError::InvalidKey(format!("{purpose} key file is unreadable")))?;
-            read.push((*purpose, bytes));
-        }
-        Self::from_key_bytes(read)
-    }
-
     fn key(&self, purpose: Purpose) -> Result<&PurposeKey, SignError> {
         self.keys.get(&purpose).ok_or(SignError::NoKey(purpose))
     }
 }
 
+#[async_trait]
 impl PurposeSigner for KeyFileSigner {
-    fn sign(
+    async fn sign(
         &self,
         _scope_key: &[u8; 32],
         purpose: Purpose,
@@ -134,11 +128,11 @@ impl PurposeSigner for KeyFileSigner {
         let key = self.key(purpose)?;
         Ok(Signed {
             kid: key.current.kid.clone(),
-            signature: sign_ed25519(key.seed, input),
+            signature: key.key.sign(input).to_bytes(),
         })
     }
 
-    fn keys(&self, purpose: Purpose) -> Result<PurposeKeys, SignError> {
+    async fn keys(&self, purpose: Purpose) -> Result<PurposeKeys, SignError> {
         let key = self.key(purpose)?;
         Ok(PurposeKeys {
             current: key.current.clone(),

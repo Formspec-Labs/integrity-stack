@@ -14,14 +14,28 @@
 
 use std::fmt;
 
-/// Names what a signing key is for. Closed over every signer in the stack.
+use async_trait::async_trait;
+
+/// Names what a signing key is for. Closed over every signer in the stack (ADR 0169 section 1.1).
 ///
-/// A unit that adds a signer adds its variant here, so a key can never be reused across purposes
-/// by accident.
+/// A signer added later adds its variant here, so a key can never be reused across purposes by
+/// accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Purpose {
     /// Issuer JWT of an SD-JWT response attestation (ADR 0166 section 4).
     Attestation,
+    /// The formspec e-signature seal.
+    Seal,
+    /// The delegated Response signature.
+    DelegatedResponse,
+    /// Export grants (ADR 0164).
+    ExportGrant,
+    /// WOS provenance (WS-043).
+    Runtime,
+    /// Trellis events and checkpoints.
+    Ledger,
+    /// Trellis export manifests.
+    Manifest,
 }
 
 impl Purpose {
@@ -30,6 +44,12 @@ impl Purpose {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Attestation => "attestation",
+            Self::Seal => "seal",
+            Self::DelegatedResponse => "delegated-response",
+            Self::ExportGrant => "export-grant",
+            Self::Runtime => "runtime",
+            Self::Ledger => "ledger",
+            Self::Manifest => "manifest",
         }
     }
 }
@@ -82,12 +102,18 @@ pub enum SignError {
 }
 
 /// Signs prepared bytes with the key dedicated to a purpose.
+///
+/// Both methods are async so a KMS or Vault adapter can call out, like
+/// [`AsyncSealer`](crate::AsyncSealer). `sign` returns a `Result` because a backend can fail, and
+/// `keys` exists because a JWS or COSE header carries the `kid`, which the caller must know
+/// before it can build the bytes to sign.
+#[async_trait]
 pub trait PurposeSigner: Send + Sync {
     /// Signs `input` for `purpose` on behalf of the tenant scope `scope_key`.
     ///
     /// # Errors
     /// Returns [`SignError::NoKey`] when the purpose has no key, or a backend failure.
-    fn sign(
+    async fn sign(
         &self,
         scope_key: &[u8; 32],
         purpose: Purpose,
@@ -98,5 +124,5 @@ pub trait PurposeSigner: Send + Sync {
     ///
     /// # Errors
     /// Returns [`SignError::NoKey`] when the purpose has no key.
-    fn keys(&self, purpose: Purpose) -> Result<PurposeKeys, SignError>;
+    async fn keys(&self, purpose: Purpose) -> Result<PurposeKeys, SignError>;
 }

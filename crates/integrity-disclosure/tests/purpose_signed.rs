@@ -1,11 +1,10 @@
 // Rust guideline compliant 2026-02-21
 
-//! Issuing through the purpose signer changes who signs, never what is signed.
+//! Signing outside the crate changes who signs, never what is signed.
 
-use integrity_cose::KeyFileSigner;
+use integrity_cose::{KeyFileSigner, sign_ed25519};
 use integrity_disclosure::{
-    Encoding, ErrorCode, IssuanceSalts, IssueParams, IssuerPin, VerifyOptions, issue, issue_signed,
-    verify,
+    Encoding, IssuanceSalts, IssueParams, IssuerPin, VerifyOptions, issue, prepare, verify,
 };
 use integrity_seam::{OsSecureRandom, Purpose, PurposeSigner};
 use serde_json::{Map, json};
@@ -30,24 +29,25 @@ fn params(kid: &str) -> IssueParams {
     }
 }
 
-#[test]
-fn the_purpose_signer_issues_what_the_seed_would_and_the_pinned_key_verifies_it() {
+#[tokio::test]
+async fn a_port_signed_issuance_is_what_the_seed_would_issue_and_the_pinned_key_verifies_it() {
     let signer = KeyFileSigner::from_key_bytes([(Purpose::Attestation, SEED.to_vec())]).unwrap();
-    let current = signer.keys(Purpose::Attestation).unwrap().current;
+    let current = signer.keys(Purpose::Attestation).await.unwrap().current;
     let salts = IssuanceSalts::generate(&OsSecureRandom, &["income", "name"]).unwrap();
     let params = params(&current.kid);
 
-    let by_signer = issue_signed(
-        &params,
-        &claims(),
-        &salts,
-        &signer,
-        &SCOPE,
-        Purpose::Attestation,
-    )
-    .unwrap();
-    let by_seed = issue(&params, &claims(), &salts, &SEED).unwrap();
-    assert_eq!(by_signer, by_seed);
+    let prepared = prepare(&params, &claims(), &salts).unwrap();
+    let signed = signer
+        .sign(&SCOPE, Purpose::Attestation, prepared.signing_input())
+        .await
+        .unwrap();
+    assert_eq!(signed.kid, current.kid);
+    assert_eq!(
+        signed.signature,
+        sign_ed25519(SEED, prepared.signing_input())
+    );
+    let assembled = prepared.assemble(&signed.signature).unwrap();
+    assert_eq!(assembled, issue(&params, &claims(), &salts, &SEED).unwrap());
 
     let pin = IssuerPin {
         iss: params.iss.clone(),
@@ -58,22 +58,6 @@ fn the_purpose_signer_issues_what_the_seed_would_and_the_pinned_key_verifies_it(
         expected_typ: TYP,
         encoding: Encoding::Pinned,
     };
-    let verified = verify(&by_signer.present(&["name"]).unwrap(), &[pin], &options).unwrap();
+    let verified = verify(&assembled.present(&["name"]).unwrap(), &[pin], &options).unwrap();
     assert_eq!(verified.disclosed.len(), 1);
-}
-
-#[test]
-fn a_header_kid_the_signer_did_not_sign_under_is_refused() {
-    let signer = KeyFileSigner::from_key_bytes([(Purpose::Attestation, SEED.to_vec())]).unwrap();
-    let salts = IssuanceSalts::generate(&OsSecureRandom, &["income", "name"]).unwrap();
-    let error = issue_signed(
-        &params("some-other-kid"),
-        &claims(),
-        &salts,
-        &signer,
-        &SCOPE,
-        Purpose::Attestation,
-    )
-    .unwrap_err();
-    assert_eq!(error.code(), ErrorCode::Signer);
 }

@@ -5,12 +5,13 @@ use integrity_seam::{Purpose, PurposeSigner, SignError};
 
 const SCOPE: [u8; 32] = [7; 32];
 
-#[test]
-fn a_signature_verifies_under_the_published_key() {
+#[tokio::test]
+async fn a_signature_verifies_under_the_published_key() {
     let signer = KeyFileSigner::from_key_bytes([(Purpose::Attestation, vec![1; 32])]).unwrap();
-    let published = signer.keys(Purpose::Attestation).unwrap();
+    let published = signer.keys(Purpose::Attestation).await.unwrap();
     let signed = signer
         .sign(&SCOPE, Purpose::Attestation, b"signing input")
+        .await
         .unwrap();
 
     assert_eq!(signed.kid, published.current.kid);
@@ -26,32 +27,35 @@ fn a_signature_verifies_under_the_published_key() {
     ));
 }
 
-#[test]
-fn a_rotation_publishes_the_previous_key_beside_the_current_one() {
+#[tokio::test]
+async fn a_rotation_publishes_the_previous_key_beside_the_current_one() {
     let old = KeyFileSigner::from_key_bytes([(Purpose::Attestation, vec![1; 32])]).unwrap();
-    let old_public = old.keys(Purpose::Attestation).unwrap().current;
+    let old_public = old.keys(Purpose::Attestation).await.unwrap().current;
     let mut rotated_file = vec![2; 32];
     rotated_file.extend_from_slice(&old_public.public_key);
     let rotated = KeyFileSigner::from_key_bytes([(Purpose::Attestation, rotated_file)]).unwrap();
 
-    let keys = rotated.keys(Purpose::Attestation).unwrap();
+    let keys = rotated.keys(Purpose::Attestation).await.unwrap();
     assert_eq!(keys.previous, Some(old_public.clone()));
     assert_ne!(keys.current.kid, old_public.kid);
-    let signed = rotated.sign(&SCOPE, Purpose::Attestation, b"x").unwrap();
+    let signed = rotated
+        .sign(&SCOPE, Purpose::Attestation, b"x")
+        .await
+        .unwrap();
     assert_eq!(signed.kid, keys.current.kid, "only the current key signs");
 }
 
-#[test]
-fn a_purpose_without_a_key_does_not_sign() {
+#[tokio::test]
+async fn a_purpose_without_a_key_does_not_sign() {
     let signer = KeyFileSigner::from_key_bytes(std::iter::empty()).unwrap();
     assert_eq!(
-        signer.sign(&SCOPE, Purpose::Attestation, b"x"),
+        signer.sign(&SCOPE, Purpose::Attestation, b"x").await,
         Err(SignError::NoKey(Purpose::Attestation))
     );
 }
 
-#[test]
-fn malformed_key_files_are_refused() {
+#[tokio::test]
+async fn malformed_key_files_are_refused() {
     for bytes in [vec![], vec![1; 31], vec![1; 33], vec![1; 65]] {
         assert!(KeyFileSigner::from_key_bytes([(Purpose::Attestation, bytes)]).is_err());
     }
@@ -61,6 +65,7 @@ fn malformed_key_files_are_refused() {
     file.extend_from_slice(
         &current
             .keys(Purpose::Attestation)
+            .await
             .unwrap()
             .current
             .public_key,
