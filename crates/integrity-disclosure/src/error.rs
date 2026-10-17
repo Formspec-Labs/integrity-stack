@@ -59,6 +59,8 @@ pub enum ErrorCode {
     UnknownPath,
     /// The entropy source failed.
     Entropy,
+    /// The signer failed or signed under a key other than the header `kid`.
+    Signer,
 }
 
 impl ErrorCode {
@@ -91,6 +93,7 @@ impl ErrorCode {
             Self::InvalidParams => "invalid_params",
             Self::UnknownPath => "unknown_path",
             Self::Entropy => "entropy",
+            Self::Signer => "signer",
         }
     }
 }

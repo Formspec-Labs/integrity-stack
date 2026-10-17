@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use integrity_cose::sign_ed25519;
-use integrity_seam::SecureRandom;
+use integrity_seam::{Purpose, PurposeSigner, SecureRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -212,6 +212,48 @@ pub fn issue(
     salts: &IssuanceSalts,
     signing_seed: &[u8; 32],
 ) -> Result<Issued> {
+    issue_with(params, claims, salts, |signing_input| {
+        Ok(sign_ed25519(*signing_seed, signing_input))
+    })
+}
+
+/// Issues an SD-JWT whose issuer JWT is signed by the `purpose` key of a [`PurposeSigner`].
+///
+/// `params.kid` must be the signer's current `kid` for `purpose` (see [`PurposeSigner::keys`]):
+/// the header is built before signing, and a signature made under any other key is refused.
+/// Everything else is as [`issue`], so the same salts and claims give byte-identical output.
+///
+/// # Errors
+///
+/// As [`issue`], and when the signer fails or signs under a `kid` other than `params.kid`.
+pub fn issue_signed(
+    params: &IssueParams,
+    claims: &[(String, Value)],
+    salts: &IssuanceSalts,
+    signer: &dyn PurposeSigner,
+    scope_key: &[u8; 32],
+    purpose: Purpose,
+) -> Result<Issued> {
+    issue_with(params, claims, salts, |signing_input| {
+        let signed = signer
+            .sign(scope_key, purpose, signing_input)
+            .map_err(|_| DisclosureError::new(ErrorCode::Signer, "the signer failed"))?;
+        if signed.kid != params.kid {
+            return Err(DisclosureError::new(
+                ErrorCode::Signer,
+                "the signer used a key other than params.kid",
+            ));
+        }
+        Ok(signed.signature)
+    })
+}
+
+fn issue_with(
+    params: &IssueParams,
+    claims: &[(String, Value)],
+    salts: &IssuanceSalts,
+    sign: impl FnOnce(&[u8]) -> Result<[u8; 64]>,
+) -> Result<Issued> {
     check_params(params)?;
     let disclosures = build_disclosures(claims, salts)?;
     if disclosures
@@ -253,7 +295,7 @@ pub fn issue(
         b64_encode(&jcs(&Value::Object(header))?),
         b64_encode(&jcs(&Value::Object(payload))?)
     );
-    let signature = sign_ed25519(*signing_seed, signing_input.as_bytes());
+    let signature = sign(signing_input.as_bytes())?;
     let jwt = format!("{signing_input}.{}", b64_encode(&signature));
 
     let total: usize = jwt.len()
