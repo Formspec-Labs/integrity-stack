@@ -4,7 +4,7 @@
 
 Signature evidence in these synthetic byte inputs is not cryptographically valid; these tests establish preservation, not signing-method validity or schema conformance. Constructed JS non-JSON values (undefined, BigInt, cycles, etc.) live in the TS tests because they cannot be represented by wire JSON fixtures.
 
-Numbers follow `integrity-canonical-json-v1`: the exact decimal value in ECMAScript `Number::toString` layout, which equals RFC 8785 for every number a double holds in its shortest form. `333333333.33333329` therefore keeps all its digits. Regenerate independently with Python `rfc8785` 0.1.4, `../exact_jcs.py` (Decimal-based number layout; it asserts agreement with `rfc8785` wherever a double holds the number) and standard-library `hashlib`:
+Numbers follow `integrity-canonical-json-v1`: the exact decimal value in ECMAScript `Number::toString` layout. That equals RFC 8785 whenever the text is the shortest decimal that round-trips to its double, so `333333333.33333329` keeps all its digits where RFC 8785 writes `333333333.3333333`. Regenerate independently with Python `rfc8785` 0.1.4, `../exact_jcs.py` (its own number reader and layout; it asserts agreement with `rfc8785` wherever the text is its double's shortest form) and standard-library `hashlib`:
 
 ```sh
 python3 tests/fixtures/response-handoff/generate.py

@@ -113,14 +113,32 @@ function serialize(value: JsonValue): string {
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${serialize(object[key])}`).join(',')}}`;
 }
 
+// Out of range means a nonzero value that binary64 round-to-nearest-even takes to infinity
+// (magnitude >= 2^1024 - 2^970 = 0.OVERFLOW_DIGITS x 10^309) or to zero (magnitude <= 2^-1075
+// = 5^1075 / 10^1075 = 0.UNDERFLOW_DIGITS x 10^-323). Rust and Python use the same bounds.
+const OVERFLOW_DIGITS = (2n ** 1024n - 2n ** 970n).toString();
+const UNDERFLOW_DIGITS = (5n ** 1075n).toString();
+// Exponents are read up to this magnitude; a larger one is already far out of range.
+const MAX_EXPONENT = 1e15;
+
+/** Compares 0.digits with 0.bound; neither has trailing zeros. */
+function compareFraction(digits: string, bound: string): number {
+  const common = Math.min(digits.length, bound.length);
+  for (let at = 0; at < common; at += 1) {
+    const difference = digits.charCodeAt(at) - bound.charCodeAt(at);
+    if (difference !== 0) return difference;
+  }
+  return digits.length - bound.length;
+}
+
 /**
  * Lays out JSON number text as its exact decimal value in `Number::toString` layout.
  *
  * ECMA-262 §6.1.6.1.20 lays out the digits `s` (`k` of them, no trailing zeros) of a
  * value `s × 10^(n−k)`; RFC 8785 takes `s` from the nearest double, this takes it
- * from the text. Magnitudes a double cannot hold are refused, as RFC 8785 refuses them.
- * One left-to-right scan validates the grammar and finds the parts; work and memory
- * are linear in the text.
+ * from the text. A nonzero value that binary64 rounding takes to zero or infinity is
+ * refused, decided from the digits alone, as RFC 8785 refuses non-finite values. One
+ * left-to-right scan validates the grammar and finds the parts; work is linear in the text.
  */
 function canonicalNumber(text: string): string {
   const refuse = (): never => { throw new TypeError('response contains a non-number raw JSON value'); };
@@ -180,13 +198,13 @@ function canonicalNumber(text: string): string {
     : text.slice(first, last + 1);
   const k = digits.length;
   let exponent = 0;
-  for (let at = exponentStart; at < exponentEnd && exponent < 1e15; at += 1) {
+  for (let at = exponentStart; at < exponentEnd && exponent < MAX_EXPONENT; at += 1) {
     exponent = exponent * 10 + text.charCodeAt(at) - 48;
   }
   // value = 0.digits × 10^n
   const n = exponentSign * exponent + (firstInInteger >= 0 ? integerEnd - first : fractionStart - first);
-  const magnitude = Number(text);
-  if (!Number.isFinite(magnitude) || magnitude === 0) {
+  if (n > 309 || (n === 309 && compareFraction(digits, OVERFLOW_DIGITS) >= 0)
+    || n < -323 || (n === -323 && compareFraction(digits, UNDERFLOW_DIGITS) <= 0)) {
     throw new TypeError('response number is outside the binary64 range');
   }
   let body: string;
