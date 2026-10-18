@@ -164,11 +164,16 @@ pub fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 ///
 /// Canonical CBOR profile rule R4 makes a repeated map key a decode failure at
 /// any depth: readers that keep the first copy and readers that keep the last
-/// would otherwise see different content in the same bytes.
+/// would otherwise see different content in the same bytes. Keys compare by
+/// their canonical encoding, so `0x01` and `0x18 0x01` are one key, a float key
+/// compares by value whatever its width, and a tagged key compares by tag
+/// number and canonical content. A key with no canonical encoding (a NaN,
+/// infinite or negative-zero float, R5) refuses the whole value.
 ///
 /// # Errors
-/// Returns an error if `bytes` is not exactly one decodable CBOR value, or if
-/// any map at any depth carries the same canonical-encoded key twice.
+/// Returns an error if `bytes` is not exactly one decodable CBOR value, if any
+/// map at any depth carries the same canonical-encoded key twice, or if a map
+/// key has no canonical encoding.
 pub fn decode_cbor_value(bytes: &[u8]) -> Result<Value, CborHelperError> {
     let mut reader = bytes;
     let value = ciborium::from_reader(&mut reader)
@@ -824,6 +829,30 @@ mod tests {
         // Distinct keys of different types still decode.
         let distinct = [0xa2, 0x01, 0x61, b'x', 0x61, b'1', 0x61, b'y'];
         assert!(decode_cbor_value(&distinct).is_ok());
+    }
+
+    /// trellis-py `_cbor_strict` holds the same cases, with the same messages.
+    #[test]
+    fn decode_cbor_value_compares_float_and_tagged_keys_canonically() {
+        let refused = |bytes: &[u8]| decode_cbor_value(bytes).unwrap_err().to_string();
+        // NaN, +Inf and -0.0 keys have no canonical encoding.
+        for key in [
+            &[0xf9, 0x7e, 0x00][..],
+            &[0xfb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0],
+            &[0xf9, 0x7c, 0x00],
+            &[0xf9, 0x80, 0x00],
+            &[0xfb, 0x80, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            let bytes = [&[0xa1][..], key, &[0x01]].concat();
+            assert!(refused(&bytes).contains("CBOR float must"), "{key:02x?}");
+        }
+        // 1.5 as f16 and as f64 is one key.
+        let widths = [0xa2, 0xf9, 0x3e, 0x00, 0x01, 0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0, 0x02];
+        assert!(refused(&widths).contains("duplicate canonical CBOR map key `f93e00`"));
+        // Tag 7 wrapping 1, minimal and non-minimal, is one key, distinct from untagged 1.
+        let tagged = [0xa2, 0xc7, 0x01, 0x01, 0xc7, 0x18, 0x01, 0x02];
+        assert!(refused(&tagged).contains("duplicate canonical CBOR map key `c701`"));
+        assert!(decode_cbor_value(&[0xa2, 0xc7, 0x01, 0x01, 0x01, 0x02]).is_ok());
     }
 
     #[test]
