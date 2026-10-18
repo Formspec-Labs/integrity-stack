@@ -1,7 +1,7 @@
 {
   "profile": "formspec-response-signing-v1",
   "domain": "formspec.response.signed-payload.v1",
-  "oracle": "rfc8785.py 0.1.4 + Python hashlib",
+  "oracle": "rfc8785.py 0.1.4 with exact Decimal numbers (tests/fixtures/exact_jcs.py) + Python hashlib",
   "notes": "Synthetic signature members prove omission only; no signing or verification claim.",
   "valid": [
     {
@@ -41,9 +41,19 @@
       "inputJson": [
         "{\"data\":{\"\\ue000\":\"private-use\",\"😀\":\"astral\",\"text\":\"€\\n\\u000f/é\",\"minusZero\":-0,\"numbers\":[333333333.33333329,1E30,4.50,2e-3,1e-27,1e-7,1e20,1e21]}}"
       ],
-      "canonicalJson": "{\"data\":{\"minusZero\":0,\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27,1e-7,100000000000000000000,1e+21],\"text\":\"€\\n\\u000f/é\",\"😀\":\"astral\",\"\":\"private-use\"}}",
-      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2264617461223a7b226d696e75735a65726f223a302c226e756d62657273223a5b3333333333333333332e333333333333332c31652b33302c342e352c302e3030322c31652d32372c31652d372c3130303030303030303030303030303030303030302c31652b32315d2c2274657874223a22e282ac5c6e5c75303030662fc3a9222c22f09f9880223a2261737472616c222c22ee8080223a22707269766174652d757365227d7d",
-      "sha256": "df4c07e6ba4c61431137cb261286001c40f4a2d9601f6de89a4d749172d7c8f5"
+      "canonicalJson": "{\"data\":{\"minusZero\":0,\"numbers\":[333333333.33333329,1e+30,4.5,0.002,1e-27,1e-7,100000000000000000000,1e+21],\"text\":\"€\\n\\u000f/é\",\"😀\":\"astral\",\"\":\"private-use\"}}",
+      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2264617461223a7b226d696e75735a65726f223a302c226e756d62657273223a5b3333333333333333332e33333333333332392c31652b33302c342e352c302e3030322c31652d32372c31652d372c3130303030303030303030303030303030303030302c31652b32315d2c2274657874223a22e282ac5c6e5c75303030662fc3a9222c22f09f9880223a2261737472616c222c22ee8080223a22707269766174652d757365227d7d",
+      "sha256": "4806417b3c9f9f0f3d5ff84cf1c8109cd41cf3598ebae2d249019e1092ad7596"
+    },
+    {
+      "name": "nineteen-digit-decimals",
+      "inputJson": [
+        "{\"data\":{\"amount\":1234567890.123456789},\"authoredSignatures\":[{\"digest\":0.1000000000000000055511151231257827}]}",
+        "{\"data\":{\"amount\":1.234567890123456789e9}}"
+      ],
+      "canonicalJson": "{\"data\":{\"amount\":1234567890.123456789}}",
+      "bytesHex": "666f726d737065632e726573706f6e73652e7369676e65642d7061796c6f61642e7631007b2264617461223a7b22616d6f756e74223a313233343536373839302e3132333435363738397d7d",
+      "sha256": "36e7a77c20a5618efcd83f912baaf24f7d2f4911db9b995ebf53bb2c4921d27d"
     }
   ],
   "invalid": [
@@ -78,6 +88,14 @@
     {
       "name": "surrogate-object-key",
       "inputJson": "{\"\\ud800\":\"data\"}"
+    },
+    {
+      "name": "number-above-binary64-range",
+      "inputJson": "{\"data\":1e400}"
+    },
+    {
+      "name": "number-below-binary64-range",
+      "inputJson": "{\"data\":-1e-400}"
     },
     {
       "name": "surrogate-in-omitted-signature",

@@ -21,7 +21,6 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": { "canonicalize": "5.1.0" },
   "devDependencies": {
     "@types/node": "^25.8.0",
     "typescript": "^5.7.0",

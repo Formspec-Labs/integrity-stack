@@ -1,18 +1,55 @@
-/** Distinct Rust-authoritative Response handoff and signing byte profiles. */
-import canonicalize from 'canonicalize';
-
+/**
+ * Distinct Rust-authoritative Response handoff and signing byte profiles.
+ *
+ * Bytes follow `integrity-canonical-json-v1`: RFC 8785 JCS, except that a number
+ * is written as its exact decimal value in `Number::toString` layout instead of
+ * first being rounded to a double. A JS number serializes exactly as RFC 8785
+ * says; a `JSON.rawJSON` number (see {@link parseJsonExact}) keeps every digit.
+ */
 const HANDOFF_DOMAIN = 'formspec.response.handoff.v1';
 const SIGNING_DOMAIN = 'formspec.response.signed-payload.v1';
 
+/** A `JSON.rawJSON` value: a frozen, null-prototype holder of one JSON primitive's text. */
+interface RawJson { readonly rawJSON: string }
+// JSON.parse source text access (ES2026): Node 21+, Chrome 114+, Firefox 135+, Safari 18.4+.
+const json = JSON as unknown as {
+  rawJSON?: (text: string) => RawJson;
+  isRawJSON?: (value: unknown) => value is RawJson;
+};
+const isRawJson = (value: unknown): value is RawJson => json.isRawJSON?.(value) ?? false;
+
 /**
- * Builds the Rust-authoritative domain, NUL, and RFC 8785 JCS handoff bytes.
+ * Parses JSON text without losing number digits.
+ *
+ * A number stays a JS number when its source text is exactly that number's own
+ * text; otherwise it becomes `JSON.rawJSON(source)`, which the canonical byte
+ * functions write with every digit. `JSON.parse` keeps the last of repeated
+ * member names; Rust's text functions refuse them.
+ *
+ * @throws SyntaxError for invalid JSON; TypeError where the runtime lacks source text access.
+ */
+export function parseJsonExact(text: string): unknown {
+  const { rawJSON } = json;
+  if (!rawJSON) throw new TypeError('runtime lacks JSON.rawJSON');
+  return JSON.parse(text, (_key: string, value: unknown, context?: { source?: string }) => {
+    if (typeof value !== 'number') return value;
+    const source = context?.source;
+    if (source === undefined) throw new TypeError('runtime lacks JSON.parse source text access');
+    return source === JSON.stringify(value) ? value : rawJSON(source);
+  });
+}
+
+/**
+ * Builds the Rust-authoritative domain, NUL, and canonical JSON handoff bytes.
  *
  * Preserves the complete JSON object, including authoredSignatures. The caller
  * hashes these bytes using genuine SHA-256; this function performs no crypto or
  * Response schema validation. Requires TextEncoder and String.isWellFormed.
+ * Matches Rust `canonical_response_handoff_bytes_from_json` on the same JSON text
+ * when the object comes from {@link parseJsonExact}.
  *
- * @throws TypeError for a non-object root or non-JSON runtime values. The
- * maintained canonicalizer also rejects invalid Unicode strings and keys.
+ * @throws TypeError for a non-object root, non-JSON runtime values, invalid
+ * Unicode strings or keys, or a number outside the binary64 range.
  */
 export function canonicalResponseHandoffBytes(response: unknown): Uint8Array<ArrayBuffer> {
   return framedBytes(HANDOFF_DOMAIN, responseSnapshot(response));
@@ -35,7 +72,7 @@ export function canonicalResponseSignedPayloadBytes(response: unknown): Uint8Arr
 }
 
 /**
- * Serializes any JSON value with RFC 8785 JCS, matching Rust `canonical_json_bytes`.
+ * Serializes any JSON value as canonical JSON, matching Rust `canonical_json_from_bytes`.
  *
  * Applies the same admission rules as the Response profiles (no accessors, hooks, cycles, sparse
  * arrays or malformed Unicode) and adds no domain framing. The root may be any JSON value.
@@ -43,29 +80,64 @@ export function canonicalResponseSignedPayloadBytes(response: unknown): Uint8Arr
  * @throws TypeError for non-JSON runtime values or malformed Unicode.
  */
 export function canonicalJsonBytes(value: unknown): Uint8Array<ArrayBuffer> {
-  const json = canonicalize(jsonSnapshot(value, new Set()));
-  if (json === undefined) throw new TypeError('value must have a canonical JSON representation');
-  return new TextEncoder().encode(json);
+  return new TextEncoder().encode(serialize(jsonSnapshot(value, new Set())));
 }
 
-type JsonValue = null | string | boolean | number | JsonValue[] | { [key: string]: JsonValue };
+type JsonValue = null | string | boolean | number | RawJson | JsonValue[] | { [key: string]: JsonValue };
 
 function responseSnapshot(response: unknown): Record<string, JsonValue> {
-  if (response === null || typeof response !== 'object' || Array.isArray(response)) {
+  if (response === null || typeof response !== 'object' || Array.isArray(response) || isRawJson(response)) {
     throw new TypeError('response must be a JSON object');
   }
   return jsonSnapshot(response, new Set()) as Record<string, JsonValue>;
 }
 
-function framedBytes(domain: string, response: unknown): Uint8Array<ArrayBuffer> {
-  const json = canonicalize(response);
-  if (json === undefined) throw new TypeError('response must have a canonical JSON representation');
-  return new TextEncoder().encode(`${domain}\0${json}`);
+function framedBytes(domain: string, response: JsonValue): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode(`${domain}\0${serialize(response)}`);
 }
 
-// Admission checking only: serialization, ordering, and number formatting all
-// belong to the maintained RFC 8785 implementation. Serialize only admitted
-// descriptor values, so runtime Proxy reads cannot replace the checked data.
+// Serializes an admitted snapshot. JSON.stringify escapes strings exactly as RFC 8785
+// §3.2.2.2 requires, and the default sort orders member names by UTF-16 code units (§3.2.3).
+function serialize(value: JsonValue): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'number') return JSON.stringify(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (isRawJson(value)) return canonicalNumber(value.rawJSON);
+  if (Array.isArray(value)) return `[${Array.prototype.map.call(value, serialize).join(',')}]`;
+  const object = value as { [key: string]: JsonValue };
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${serialize(object[key])}`).join(',')}}`;
+}
+
+/**
+ * Lays out JSON number text as its exact decimal value in `Number::toString` layout.
+ *
+ * ECMA-262 §6.1.6.1.20 lays out the digits `s` (`k` of them, no trailing zeros) of a
+ * value `s × 10^(n−k)`; RFC 8785 takes `s` from the nearest double, this takes it
+ * from the text. Magnitudes a double cannot hold are refused, as RFC 8785 refuses them.
+ */
+function canonicalNumber(text: string): string {
+  const match = /^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/.exec(text);
+  if (!match) throw new TypeError('response contains a non-number raw JSON value');
+  const magnitude = Number(text);
+  if (!Number.isFinite(magnitude)) throw new TypeError('response number is outside the binary64 range');
+  const [, sign, integer, fraction = '', exponent = '0'] = match;
+  const significant = (integer + fraction).replace(/^0+/, '');
+  if (significant === '') return '0';
+  if (magnitude === 0) throw new TypeError('response number is outside the binary64 range');
+  const digits = significant.replace(/0+$/, '');
+  const k = digits.length;
+  // The finite, nonzero magnitude bounds n to a few hundred, so this stays exact.
+  const n = Number(exponent) - fraction.length + (significant.length - k) + k;
+  let body: string;
+  if (k <= n && n <= 21) body = digits + '0'.repeat(n - k);
+  else if (0 < n && n <= 21) body = `${digits.slice(0, n)}.${digits.slice(n)}`;
+  else if (-6 < n && n <= 0) body = `0.${'0'.repeat(-n)}${digits}`;
+  else body = `${digits[0]}${k > 1 ? `.${digits.slice(1)}` : ''}e${n > 0 ? '+' : '-'}${Math.abs(n - 1)}`;
+  return sign + body;
+}
+
+// Admission checking: serialize only admitted descriptor values, so runtime
+// Proxy reads cannot replace the checked data.
 function jsonSnapshot(value: unknown, ancestors: Set<object>): JsonValue {
   if (typeof value === 'string') {
     if (!value.isWellFormed()) throw new TypeError('response contains invalid Unicode');
@@ -73,6 +145,10 @@ function jsonSnapshot(value: unknown, ancestors: Set<object>): JsonValue {
   }
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (isRawJson(value)) {
+    canonicalNumber(value.rawJSON);
+    return value;
+  }
   if (typeof value !== 'object') {
     throw new TypeError('response contains a non-JSON value');
   }
@@ -81,8 +157,8 @@ function jsonSnapshot(value: unknown, ancestors: Set<object>): JsonValue {
   if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
     throw new TypeError('response contains a non-JSON object');
   }
-  // The dependency consults inherited toJSON too. Inspect descriptors without
-  // executing inherited getters or allowing prototype hooks to replace data.
+  // Refuse inherited toJSON hooks, inspecting descriptors without executing
+  // inherited getters or letting prototype hooks replace data.
   for (let parent = prototype; parent !== null; parent = Object.getPrototypeOf(parent)) {
     const hook = Object.getOwnPropertyDescriptor(parent, 'toJSON');
     if (hook && (!('value' in hook) || typeof hook.value === 'function')) {

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { canonicalJsonBytes, canonicalResponseHandoffBytes, canonicalResponseSignedPayloadBytes } from './index.js';
+import { canonicalJsonBytes, canonicalResponseHandoffBytes, canonicalResponseSignedPayloadBytes, parseJsonExact } from './index.js';
 
 interface Vector {
   name: string;
@@ -19,7 +19,7 @@ describe('shared Rust / TS handoff wire vectors', () => {
   for (const vector of vectors.valid) {
     it(vector.name, async () => {
       for (const input of vector.inputJson) {
-        const bytes = canonicalResponseHandoffBytes(JSON.parse(input));
+        const bytes = canonicalResponseHandoffBytes(parseJsonExact(input));
         expect(hex(bytes)).toBe(vector.bytesHex);
         expect(new TextDecoder().decode(bytes)).toBe(`formspec.response.handoff.v1\0${vector.canonicalJson}`);
         const digest = await webcrypto.subtle.digest('SHA-256', bytes);
@@ -29,7 +29,7 @@ describe('shared Rust / TS handoff wire vectors', () => {
   }
   for (const vector of vectors.invalid) {
     it(`refuses ${vector.name}`, () => {
-      expect(() => canonicalResponseHandoffBytes(JSON.parse(vector.inputJson))).toThrow();
+      expect(() => canonicalResponseHandoffBytes(parseJsonExact(vector.inputJson))).toThrow();
     });
   }
   it('signature content changes the full-Response handoff', () => {
@@ -149,5 +149,36 @@ describe('canonicalJsonBytes generic JCS', () => {
     expect(() => canonicalJsonBytes('\ud800')).toThrow(TypeError);
     expect(() => canonicalJsonBytes(undefined)).toThrow(TypeError);
     expect(() => canonicalJsonBytes({ a: 1n })).toThrow(TypeError);
+  });
+});
+
+describe('exact decimal numbers', () => {
+  const { rawJSON } = JSON as unknown as { rawJSON(text: string): unknown };
+  const text = (value: unknown) => new TextDecoder().decode(canonicalJsonBytes(value));
+  it('keeps every digit of a number a double cannot hold, and keeps plain numbers plain', () => {
+    const parsed = parseJsonExact('{"amount":1234567890.123456789,"rate":0.1,"big":9007199254740993}') as Record<string, unknown>;
+    expect(parsed.rate).toBe(0.1);
+    expect(typeof parsed.amount).toBe('object');
+    expect(text(parsed)).toBe('{"amount":1234567890.123456789,"big":9007199254740993,"rate":0.1}');
+    expect(text(JSON.parse('{"amount":1234567890.123456789}'))).toBe('{"amount":1234567890.1234567}');
+  });
+  it('lays out raw numbers like Number::toString and agrees with JS numbers a double holds', () => {
+    for (const [raw, expected] of [
+      ['-0.000e5', '0'], ['4.50', '4.5'], ['123e-2', '1.23'], ['0.000001', '0.000001'], ['1e-7', '1e-7'],
+      ['1e20', '100000000000000000000'], ['1E30', '1e+30'], ['1e21', '1e+21'], ['5e-324', '5e-324'],
+      ['-1.0000000000000000001', '-1.0000000000000000001'], ['1234567890123456789012', '1.234567890123456789012e+21'],
+      ['0.0000001234567890123456789', '1.234567890123456789e-7'],
+    ]) {
+      expect(text(rawJSON(raw)), raw).toBe(expected);
+    }
+    for (const value of [0.1, 4.5e-7, 1e21, 123.456, -(2 ** 60), 5e-324]) {
+      expect(text(rawJSON(String(value)))).toBe(text(value));
+    }
+  });
+  it('refuses raw values that are not numbers or lie outside the binary64 range', () => {
+    for (const raw of ['1e400', '-1e-400', '"x"', 'true', 'null']) {
+      expect(() => canonicalJsonBytes({ data: rawJSON(raw) }), raw).toThrow(TypeError);
+    }
+    expect(() => canonicalResponseHandoffBytes(rawJSON('1'))).toThrow(TypeError);
   });
 });

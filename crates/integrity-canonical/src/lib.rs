@@ -4,13 +4,28 @@
 //!
 //! This crate owns the `integrity-canonical-json-v1` substrate rule:
 //! RFC 8785 JSON Canonicalization Scheme bytes framed as
-//! `domain || NUL || canonical-json`.
+//! `domain || NUL || canonical-json`, with one deliberate change to RFC 8785
+//! §3.2.2.3: a number is written as its *exact* decimal value, laid out the way
+//! ECMAScript `Number::toString` lays out digits. RFC 8785 first rounds every
+//! number to an IEEE 754 double, which loses digits beyond about 17 and so
+//! cannot carry Formspec decimals (at least 18 significant digits, Core §3.4.1).
+//! For any number a double holds exactly in its shortest form, which covers
+//! everything JavaScript and `serde_json` print, the bytes equal RFC 8785.
+//! Magnitudes outside the double range are refused, as RFC 8785 refuses them.
+//!
+//! The `*_from_json` functions read numbers as text, so nothing passes through
+//! `f64`. The `&Value` functions are exact for the numbers a `serde_json::Value`
+//! holds, which were already rounded to `f64` if the Value was parsed from text.
 //!
 //! Formspec response signing is a profile over this substrate. Its wire-visible
 //! profile name remains `formspec-response-signing-v1`, while the reusable byte
 //! primitive is `integrity-canonical-json-v1`.
 
+use std::fmt;
+
+use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 /// Identifies the shared canonical JSON substrate.
@@ -104,14 +119,15 @@ pub fn canonicalize_response(response: &Value) -> Result<Value, String> {
     }
 }
 
-/// Serializes a JSON value with RFC 8785 JCS.
+/// Serializes a JSON value under `integrity-canonical-json-v1`.
 ///
 /// # Errors
 ///
-/// Returns an error when the value cannot be serialized as canonical JSON.
+/// Returns an error when a number lies outside the binary64 range.
 pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
-    serde_json_canonicalizer::to_vec(value)
-        .map_err(|error| format!("JCS canonicalization failed: {error}"))
+    let mut out = Vec::new();
+    write_value(&mut out, value)?;
+    Ok(out)
 }
 
 /// Builds `domain || NUL || JCS(value)` bytes.
@@ -163,10 +179,60 @@ pub fn canonical_response_handoff_bytes(response: &Value) -> Result<Vec<u8>, Str
     domain_separated_canonical_bytes(RESPONSE_HANDOFF_DOMAIN, response)
 }
 
+/// Builds Formspec response-handoff preimage bytes from Response JSON text.
+///
+/// Reads numbers as text, so a decimal keeps every digit the sender wrote.
+/// Prefer this over [`canonical_response_handoff_bytes`] whenever the
+/// Response arrives or is stored as JSON text.
+///
+/// # Errors
+///
+/// Returns an error when `response_json` is not valid JSON, its root is not an
+/// object, an object repeats a member name, or a number lies outside the
+/// binary64 range.
+pub fn canonical_response_handoff_bytes_from_json(response_json: &[u8]) -> Result<Vec<u8>, String> {
+    framed_response_from_json(RESPONSE_HANDOFF_DOMAIN, response_json, None)
+}
+
+/// Builds Formspec response-signing preimage bytes from Response JSON text.
+///
+/// The text counterpart of [`canonical_response_signed_payload_bytes`]: it
+/// omits top-level `authoredSignatures` and keeps every digit of every number.
+///
+/// # Errors
+///
+/// Returns the errors of [`canonical_response_handoff_bytes_from_json`],
+/// including for malformed content inside the omitted member.
+pub fn canonical_response_signed_payload_bytes_from_json(
+    response_json: &[u8],
+) -> Result<Vec<u8>, String> {
+    framed_response_from_json(DOMAIN_SEPARATION, response_json, Some("authoredSignatures"))
+}
+
+/// Builds a signed-payload digest from Formspec Response JSON text.
+///
+/// # Errors
+///
+/// Returns the errors of [`canonical_response_signed_payload_bytes_from_json`].
+pub fn build_signed_payload_from_json(
+    response_json: &[u8],
+    algorithm: DigestAlgorithm,
+) -> Result<SignedPayload, String> {
+    let canonical_bytes = canonical_response_signed_payload_bytes_from_json(response_json)?;
+    let digest = compute_digest(&canonical_bytes, algorithm);
+    Ok(SignedPayload {
+        canonical_bytes,
+        digest_algorithm: algorithm,
+        digest,
+    })
+}
+
 /// Decodes bytes produced by [`canonical_response_handoff_bytes`].
 ///
 /// Accepts only the exact domain tag, separator byte and canonical JSON, so a
 /// consumer of protected Response plaintext cannot accept another encoding.
+/// The canonical check reads numbers as text. The returned `Value` holds
+/// numbers as `f64`, so commit to `bytes`, never to a re-encoding of the Value.
 ///
 /// # Errors
 ///
@@ -176,26 +242,259 @@ pub fn parse_canonical_response_handoff_bytes(bytes: &[u8]) -> Result<Value, Str
         .strip_prefix(RESPONSE_HANDOFF_DOMAIN.as_bytes())
         .and_then(|rest| rest.strip_prefix(&[DOMAIN_SEPARATOR_BYTE]))
         .ok_or("response handoff domain tag differs")?;
-    let value: Value =
-        serde_json::from_slice(json).map_err(|_| "response handoff JSON is invalid".to_string())?;
-    if canonical_response_handoff_bytes(&value)? != bytes {
+    let canonical = canonical_response_handoff_bytes_from_json(json)
+        .map_err(|_| "response handoff JSON is invalid".to_string())?;
+    if canonical != bytes {
         return Err("response handoff bytes are not canonical".to_string());
     }
-    Ok(value)
+    serde_json::from_slice(json).map_err(|_| "response handoff JSON is invalid".to_string())
 }
 
-/// Canonicalizes raw JSON bytes via RFC 8785 JCS.
+/// Canonicalizes raw JSON bytes under `integrity-canonical-json-v1`.
 ///
 /// Lets callers pass wire bytes through to the byte authority instead of
-/// reserializing a `Value` they parsed elsewhere.
+/// reserializing a `Value` they parsed elsewhere. Numbers are read as text.
 ///
 /// # Errors
 ///
-/// Returns an error when `input` is not valid JSON or cannot be canonicalized.
+/// Returns an error when `input` is not valid JSON, an object repeats a member
+/// name, or a number lies outside the binary64 range.
 pub fn canonical_json_from_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
-    let value: Value = serde_json::from_slice(input)
-        .map_err(|error| format!("input is not valid JSON: {error}"))?;
-    canonical_json_bytes(&value)
+    let mut out = Vec::new();
+    write_json_text(&mut out, parse_raw(input)?)?;
+    Ok(out)
+}
+
+fn framed_response_from_json(
+    domain: &str,
+    response_json: &[u8],
+    omitted: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let raw = parse_raw(response_json)?;
+    if !raw.get().starts_with('{') {
+        return Err("response must be a JSON object".to_string());
+    }
+    let mut bytes = Vec::with_capacity(domain.len() + 1 + response_json.len());
+    bytes.extend_from_slice(domain.as_bytes());
+    bytes.push(DOMAIN_SEPARATOR_BYTE);
+    write_members(&mut bytes, members(raw.get())?, omitted)?;
+    Ok(bytes)
+}
+
+fn parse_raw(input: &[u8]) -> Result<&RawValue, String> {
+    serde_json::from_slice(input).map_err(|error| format!("input is not valid JSON: {error}"))
+}
+
+fn members(object: &str) -> Result<Vec<(String, &RawValue)>, String> {
+    serde_json::from_str::<RawMembers<'_>>(object)
+        .map(|members| members.0)
+        .map_err(|error| format!("input is not valid JSON: {error}"))
+}
+
+/// One JSON object's members in document order, each value kept as raw text.
+struct RawMembers<'a>(Vec<(String, &'a RawValue)>);
+
+impl<'de> Deserialize<'de> for RawMembers<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MembersVisitor;
+        impl<'de> Visitor<'de> for MembersVisitor {
+            type Value = RawMembers<'de>;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut members = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    members.push((key, map.next_value::<&'de RawValue>()?));
+                }
+                Ok(RawMembers(members))
+            }
+        }
+        deserializer.deserialize_map(MembersVisitor)
+    }
+}
+
+// Each container re-reads its own slice, so work grows with size times depth;
+// serde_json's recursion limit (128) bounds the depth.
+fn write_json_text(out: &mut Vec<u8>, raw: &RawValue) -> Result<(), String> {
+    let text = raw.get();
+    let invalid = |error: serde_json::Error| format!("input is not valid JSON: {error}");
+    match text.as_bytes().first() {
+        Some(b'{') => write_members(out, members(text)?, None),
+        Some(b'[') => {
+            let items: Vec<&RawValue> = serde_json::from_str(text).map_err(invalid)?;
+            out.push(b'[');
+            for (index, item) in items.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_json_text(out, item)?;
+            }
+            out.push(b']');
+            Ok(())
+        }
+        Some(b'"') => write_string(out, &serde_json::from_str::<String>(text).map_err(invalid)?),
+        // serde_json admitted the token, so these are exactly `true`, `false` or `null`.
+        Some(b't' | b'f' | b'n') => {
+            out.extend_from_slice(text.as_bytes());
+            Ok(())
+        }
+        _ => write_number(out, text),
+    }
+}
+
+fn write_members(
+    out: &mut Vec<u8>,
+    mut members: Vec<(String, &RawValue)>,
+    omitted: Option<&str>,
+) -> Result<(), String> {
+    members.sort_by(|(left, _), (right, _)| left.encode_utf16().cmp(right.encode_utf16()));
+    // RFC 8785 §3.1 requires I-JSON, whose member names are unique.
+    if members.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err("JSON object repeats a member name".to_string());
+    }
+    out.push(b'{');
+    let mut first = true;
+    for (key, value) in members {
+        if Some(key.as_str()) == omitted {
+            // An omitted member must still be valid canonical input.
+            write_json_text(&mut Vec::new(), value)?;
+            continue;
+        }
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+        write_string(out, &key)?;
+        out.push(b':');
+        write_json_text(out, value)?;
+    }
+    out.push(b'}');
+    Ok(())
+}
+
+fn write_value(out: &mut Vec<u8>, value: &Value) -> Result<(), String> {
+    match value {
+        Value::Null => out.extend_from_slice(b"null"),
+        Value::Bool(true) => out.extend_from_slice(b"true"),
+        Value::Bool(false) => out.extend_from_slice(b"false"),
+        Value::Number(number) => write_number(out, &number.to_string())?,
+        Value::String(text) => write_string(out, text)?,
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_value(out, item)?;
+            }
+            out.push(b']');
+        }
+        Value::Object(map) => {
+            let mut members: Vec<_> = map.iter().collect();
+            members.sort_by(|(left, _), (right, _)| left.encode_utf16().cmp(right.encode_utf16()));
+            out.push(b'{');
+            for (index, (key, item)) in members.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_string(out, key)?;
+                out.push(b':');
+                write_value(out, item)?;
+            }
+            out.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+// serde_json escapes exactly as RFC 8785 §3.2.2.2 does: `"`, `\\` and the
+// control characters, with lowercase `\u00xx` for those lacking a short form.
+fn write_string(out: &mut Vec<u8>, text: &str) -> Result<(), String> {
+    serde_json::to_writer(&mut *out, text).map_err(|error| format!("string write failed: {error}"))
+}
+
+/// Writes a JSON number as its exact decimal value in `Number::toString` layout.
+///
+/// ECMA-262 §6.1.6.1.20 lays out the digits `s` (`k` of them, no trailing
+/// zeros) of a value `s × 10^(n−k)`. RFC 8785 takes `s` from the nearest double;
+/// this takes it from the decimal text, so no digit is lost.
+fn write_number(out: &mut Vec<u8>, text: &str) -> Result<(), String> {
+    let invalid = || format!("`{text}` is not a JSON number");
+    let out_of_range = || format!("number `{text}` is outside the binary64 range");
+    // The double only checks magnitude, as RFC 8785 refuses non-finite values;
+    // it also bounds `n` below to a few hundred, so the arithmetic cannot overflow.
+    let magnitude: f64 = text.parse().map_err(|_| invalid())?;
+    if !magnitude.is_finite() {
+        return Err(out_of_range());
+    }
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().map_err(|_| invalid())?),
+        None => (unsigned, 0),
+    };
+    let (integer, fraction) = match mantissa.split_once('.') {
+        Some((_, "")) => return Err(invalid()),
+        Some(parts) => parts,
+        None => (mantissa, ""),
+    };
+    let is_digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if integer.is_empty()
+        || (integer.len() > 1 && integer.starts_with('0'))
+        || !is_digits(integer)
+        || !is_digits(fraction)
+    {
+        return Err(invalid());
+    }
+    let all_digits = [integer, fraction].concat();
+    let significant = all_digits.trim_start_matches('0');
+    if significant.is_empty() {
+        out.push(b'0');
+        return Ok(());
+    }
+    if magnitude == 0.0 {
+        return Err(out_of_range());
+    }
+    let digits = significant.trim_end_matches('0').as_bytes();
+    let k = i64::try_from(digits.len()).map_err(|_| invalid())?;
+    let dropped_zeros = i64::try_from(significant.len() - digits.len()).map_err(|_| invalid())?;
+    let fraction_len = i64::try_from(fraction.len()).map_err(|_| invalid())?;
+    let n = exponent - fraction_len + dropped_zeros + k;
+    if negative {
+        out.push(b'-');
+    }
+    if k <= n && n <= 21 {
+        out.extend_from_slice(digits);
+        out.resize(
+            out.len() + usize::try_from(n - k).map_err(|_| invalid())?,
+            b'0',
+        );
+    } else if 0 < n && n <= 21 {
+        let (whole, rest) = digits.split_at(usize::try_from(n).map_err(|_| invalid())?);
+        out.extend_from_slice(whole);
+        out.push(b'.');
+        out.extend_from_slice(rest);
+    } else if -6 < n && n <= 0 {
+        out.extend_from_slice(b"0.");
+        out.resize(
+            out.len() + usize::try_from(-n).map_err(|_| invalid())?,
+            b'0',
+        );
+        out.extend_from_slice(digits);
+    } else {
+        out.push(digits[0]);
+        if k > 1 {
+            out.push(b'.');
+            out.extend_from_slice(&digits[1..]);
+        }
+        out.push(b'e');
+        out.push(if n > 0 { b'+' } else { b'-' });
+        out.extend_from_slice((n - 1).unsigned_abs().to_string().as_bytes());
+    }
+    Ok(())
 }
 
 /// Builds a signed-payload digest for a Formspec Response.
@@ -477,6 +776,107 @@ mod tests {
         assert_eq!(
             d1.digest, d2.digest,
             "digests must be identical regardless of JSON key insertion order"
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_number_tests {
+    use super::*;
+
+    fn canonical_text(json: &str) -> Result<String, String> {
+        canonical_json_from_bytes(json.as_bytes()).map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn numbers_take_number_to_string_layout_over_their_exact_digits() {
+        for (input, expected) in [
+            ("0", "0"),
+            ("-0", "0"),
+            ("-0.000e5", "0"),
+            ("4.50", "4.5"),
+            ("123e-2", "1.23"),
+            ("2e-3", "0.002"),
+            ("0.000001", "0.000001"),
+            ("1e-7", "1e-7"),
+            ("1e20", "100000000000000000000"),
+            ("1E30", "1e+30"),
+            ("1e21", "1e+21"),
+            ("5e-324", "5e-324"),
+            ("9007199254740993", "9007199254740993"),
+            ("-1.0000000000000000001", "-1.0000000000000000001"),
+            ("1234567890123456789012", "1.234567890123456789012e+21"),
+            ("0.0000001234567890123456789", "1.234567890123456789e-7"),
+        ] {
+            assert_eq!(canonical_text(input).unwrap(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn magnitudes_outside_binary64_and_non_json_numbers_refuse() {
+        for input in [
+            "1e400", "-1e400", "1e-400", "01", "1.", ".5", "+1", "NaN", "1e",
+        ] {
+            assert!(canonical_text(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn text_api_keeps_the_digits_the_value_api_rounds_and_agrees_elsewhere() {
+        let exact = r#"{"amount":1234567890.123456789,"count":3,"rate":0.1}"#;
+        let value: Value = serde_json::from_str(exact).unwrap();
+        assert_eq!(
+            canonical_text(exact).unwrap(),
+            r#"{"amount":1234567890.123456789,"count":3,"rate":0.1}"#
+        );
+        assert_eq!(
+            String::from_utf8(canonical_json_bytes(&value).unwrap()).unwrap(),
+            r#"{"amount":1234567890.1234567,"count":3,"rate":0.1}"#
+        );
+        let shortest = r#"{"rate":0.1,"amount":1234567890.1234567,"count":3}"#;
+        assert_eq!(
+            canonical_json_from_bytes(shortest.as_bytes()).unwrap(),
+            canonical_json_bytes(&serde_json::from_str(shortest).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn nineteen_digit_decimal_round_trips_through_handoff_and_signing_bytes() {
+        let response =
+            br#"{"id":"r-1","data":{"amount":1234567890.123456789},"authoredSignatures":[]}"#;
+        let handoff = canonical_response_handoff_bytes_from_json(response).unwrap();
+        let reread = parse_canonical_response_handoff_bytes(&handoff).unwrap();
+        assert_eq!(reread["id"], "r-1");
+        let json = &handoff[RESPONSE_HANDOFF_DOMAIN.len() + 1..];
+        assert_eq!(canonical_json_from_bytes(json).unwrap(), json);
+        assert!(
+            std::str::from_utf8(json)
+                .unwrap()
+                .contains("1234567890.123456789")
+        );
+        let signed = build_signed_payload_from_json(response, DigestAlgorithm::Sha256).unwrap();
+        let signed_json =
+            std::str::from_utf8(&signed.canonical_bytes[DOMAIN_SEPARATION.len() + 1..]).unwrap();
+        assert_eq!(
+            signed_json,
+            r#"{"data":{"amount":1234567890.123456789},"id":"r-1"}"#
+        );
+    }
+
+    #[test]
+    fn text_api_refuses_repeated_members_non_objects_and_bad_omitted_content() {
+        assert!(canonical_text(r#"{"a":1,"\u0061":2}"#).is_err());
+        assert!(canonical_text(r#"[{"a":1,"a":1}]"#).is_err());
+        assert!(canonical_response_handoff_bytes_from_json(b"[]").is_err());
+        assert!(
+            canonical_response_signed_payload_bytes_from_json(
+                br#"{"authoredSignatures":[{"value":"\ud800"}]}"#
+            )
+            .is_err()
+        );
+        assert!(
+            canonical_response_signed_payload_bytes_from_json(br#"{"authoredSignatures":[1e400]}"#)
+                .is_err()
         );
     }
 }

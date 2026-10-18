@@ -553,8 +553,8 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
+ "serde",
  "serde_json",
- "serde_json_canonicalizer",
  "sha2",
 ]
 

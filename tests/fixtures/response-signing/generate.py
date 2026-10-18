@@ -1,8 +1,11 @@
-"""Independent full-Response signing vectors: Python rfc8785 and hashlib only."""
+"""Independent full-Response signing vectors: Python rfc8785 with exact Decimal numbers, and hashlib."""
 import hashlib
 import json
+import sys
 from pathlib import Path
-import rfc8785
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import exact_jcs  # noqa: E402
 
 DOMAIN = b'formspec.response.signed-payload.v1\0'
 response = {
@@ -24,10 +27,12 @@ variants += [{**rich, 'authoredSignatures': signatures} for signatures in
 inputs = [('existing-rust-vector', [json.dumps(response)]),
           ('retained-members-and-cosignature-stability', [json.dumps(v, ensure_ascii=False) for v in variants]),
           ('reordered-rich-response', [json.dumps(dict(reversed(list(rich.items()))), ensure_ascii=False)]),
-          ('unicode-and-numbers', ['{"data":{"\\ue000":"private-use","😀":"astral","text":"€\\n\\u000f/é","minusZero":-0,"numbers":[333333333.33333329,1E30,4.50,2e-3,1e-27,1e-7,1e20,1e21]}}'])]
+          ('unicode-and-numbers', ['{"data":{"\\ue000":"private-use","😀":"astral","text":"€\\n\\u000f/é","minusZero":-0,"numbers":[333333333.33333329,1E30,4.50,2e-3,1e-27,1e-7,1e20,1e21]}}']),
+          ('nineteen-digit-decimals', ['{"data":{"amount":1234567890.123456789},"authoredSignatures":[{"digest":0.1000000000000000055511151231257827}]}',
+                                       '{"data":{"amount":1.234567890123456789e9}}'])]
 valid = []
 for name, raw_inputs in inputs:
-    outputs = [rfc8785.dumps({k: v for k, v in json.loads(raw).items() if k != 'authoredSignatures'}) for raw in raw_inputs]
+    outputs = [exact_jcs.dumps({k: v for k, v in exact_jcs.loads(raw).items() if k != 'authoredSignatures'}) for raw in raw_inputs]
     assert all(output == outputs[0] for output in outputs)
     framed = DOMAIN + outputs[0]
     valid.append({'name': name, 'inputJson': raw_inputs, 'canonicalJson': outputs[0].decode(),
@@ -38,6 +43,6 @@ invalid += [{'name': 'surrogate-in-omitted-signature', 'inputJson': '{"authoredS
             {'name': 'surrogate-key-in-omitted-signature', 'inputJson': '{"authoredSignatures":{"\\udfff":true}}'}]
 Path(__file__).with_name('vectors.json').write_text(json.dumps({
     'profile': 'formspec-response-signing-v1', 'domain': DOMAIN[:-1].decode(),
-    'oracle': 'rfc8785.py 0.1.4 + Python hashlib',
+    'oracle': 'rfc8785.py 0.1.4 with exact Decimal numbers (tests/fixtures/exact_jcs.py) + Python hashlib',
     'notes': 'Synthetic signature members prove omission only; no signing or verification claim.',
     'valid': valid, 'invalid': invalid}, indent=2, ensure_ascii=False)+'\n')

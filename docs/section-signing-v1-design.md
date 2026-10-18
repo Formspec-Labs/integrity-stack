@@ -41,7 +41,7 @@ This is a recommendation, not a landed schema change. The lead must route it to 
 
 ## Prior art and independent reference
 
-- RFC 8785 JCS defines deterministic JSON serialization, Unicode preservation, UTF-16 property ordering and interoperable number constraints: https://www.rfc-editor.org/rfc/rfc8785 . Reuse existing `serde_json_canonicalizer` 0.3 and SHA-2 0.10 already in integrity-canonical; avoid a local serializer/crypto implementation.
+- RFC 8785 JCS defines deterministic JSON serialization, Unicode preservation, UTF-16 property ordering and interoperable number constraints: https://www.rfc-editor.org/rfc/rfc8785 . Reuse integrity-canonical's canonical JSON writer (RFC 8785 with exact decimal numbers) and SHA-2 0.10; avoid another serializer/crypto implementation.
 - Installed independent Python reference `rfc8785` 0.1.4 (Trail of Bits: https://github.com/trailofbits/rfc8785.py) plus standard-library hashlib. Existing Python `jcs` 0.2.1 supplies an additional oracle when needed. No installation ran. They do not import Rust or read expected vector bytes to derive payloads.
 - RFC 9535 JSONPath: https://www.rfc-editor.org/rfc/rfc9535 . General query expressions are intentionally not used: accepted Formspec paths are a closed concrete-path grammar, not queries/wildcards. A small grammar/parser is project-owned glue, while canonical serialization/hashing use maintained packages.
 - No maintained crypto package can infer logical identity from equal JSON values. This is a producer representation issue, not a missing cryptographic primitive.
