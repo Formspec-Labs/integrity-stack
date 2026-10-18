@@ -1,10 +1,12 @@
 //! Pinned signing keys: the trust anchor an export's own registry is checked against.
 //!
 //! An export carries its own signing-key registry, so a verifier that trusts it trusts whoever
-//! built the export. A relying party that pins the deployment's public key history asks one more
-//! question of a verified export: does every key it cites resolve to a pinned key? The history is
-//! the file Trellis is started with (`TRELLIS_SIGNING_KEY_HISTORY_PATH`): a JSON array of rows
-//! with a hex `public_key`, oldest first. Other fields are the server's concern.
+//! built the export. A relying party that pins the deployment's public key histories asks one more
+//! question of a verified export: does every key it cites resolve to a pinned key of the purpose
+//! that signed it? Trellis signs events and checkpoints with its Ledger key and the manifest with
+//! its Manifest key (ADR 0169 §4), each with its own history file
+//! (`TRELLIS_SIGNING_KEY_HISTORY_PATH`, `TRELLIS_MANIFEST_SIGNING_KEY_HISTORY_PATH`): a JSON array
+//! of rows with a hex `public_key`, oldest first. Other fields are the server's concern.
 
 use std::collections::BTreeMap;
 
@@ -15,10 +17,41 @@ use super::parse::{decode_value, parse_key_registry, parse_sign1_array, parse_si
 use super::{SUITE_ID_PHASE_1_I128, util::hex_decode};
 use trellis_types::map_lookup_fixed_bytes;
 
-/// The public keys a deployment has signed with, by `kid`.
+/// The public keys one signing purpose has used, by `kid`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PinnedSigningKeys {
     keys: BTreeMap<Vec<u8>, [u8; 32]>,
+}
+
+/// A deployment's pinned Trellis keys, by the purpose each signs (ADR 0169 §4).
+///
+/// An export is accepted only when its events and checkpoints cite Ledger keys and its manifest
+/// cites a Manifest key, so a key pinned for one purpose cannot vouch for the other's artifacts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedTrellisKeys {
+    ledger: PinnedSigningKeys,
+    manifest: PinnedSigningKeys,
+}
+
+impl PinnedTrellisKeys {
+    /// Pins the Ledger keys (events, checkpoints) and the Manifest keys (export manifests).
+    #[must_use]
+    pub const fn new(ledger: PinnedSigningKeys, manifest: PinnedSigningKeys) -> Self {
+        Self { ledger, manifest }
+    }
+
+    /// Reads the Ledger and Manifest key history files.
+    ///
+    /// # Errors
+    /// As [`PinnedSigningKeys::from_history_json`], for either file.
+    pub fn from_history_json(ledger: &[u8], manifest: &[u8]) -> Result<Self, String> {
+        Ok(Self::new(
+            PinnedSigningKeys::from_history_json(ledger)
+                .map_err(|error| format!("ledger {error}"))?,
+            PinnedSigningKeys::from_history_json(manifest)
+                .map_err(|error| format!("manifest {error}"))?,
+        ))
+    }
 }
 
 /// Why an export was not accepted against the pinned keys.
@@ -73,8 +106,9 @@ impl PinnedSigningKeys {
     }
 }
 
-/// Checks that every key a verified export cites is a pinned key, and optionally that its head
-/// checkpoint is `expected_head`.
+/// Checks that every key a verified export cites is a pinned key of the purpose that signed it
+/// (the manifest a Manifest key; events and checkpoints a Ledger key), and optionally that its
+/// head checkpoint is `expected_head`.
 ///
 /// This adds to full export verification; it does not replace it.
 ///
@@ -82,7 +116,7 @@ impl PinnedSigningKeys {
 /// See [`PinnedExportRefusal`].
 pub fn check_pinned_signers(
     export_zip: &[u8],
-    pinned: &PinnedSigningKeys,
+    pinned: &PinnedTrellisKeys,
     expected_head: Option<[u8; 32]>,
 ) -> Result<(), PinnedExportRefusal> {
     let malformed = |what: &str| PinnedExportRefusal::Malformed(what.to_owned());
@@ -97,14 +131,14 @@ pub fn check_pinned_signers(
         .map_err(|error| malformed(&error.to_string()))?;
     let manifest = parse_sign1_bytes(member("000-manifest.cbor")?)
         .map_err(|error| malformed(&error.to_string()))?;
-    let mut kids = vec![manifest.kid.clone()];
+    let mut kids = vec![(&pinned.manifest, manifest.kid.clone())];
     for member_name in ["010-events.cbor", "040-checkpoints.cbor"] {
         let rows = parse_sign1_array(member(member_name)?)
             .map_err(|error| malformed(&error.to_string()))?;
-        kids.extend(rows.into_iter().map(|row| row.kid));
+        kids.extend(rows.into_iter().map(|row| (&pinned.ledger, row.kid)));
     }
-    for kid in kids {
-        let Some(pinned_key) = pinned.keys.get(&kid) else {
+    for (purpose, kid) in kids {
+        let Some(pinned_key) = purpose.keys.get(&kid) else {
             return Err(PinnedExportRefusal::UnpinnedSigner);
         };
         if registry.get(&kid).map(|entry| entry.public_key) != Some(*pinned_key) {

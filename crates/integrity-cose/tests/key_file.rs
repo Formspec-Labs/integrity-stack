@@ -87,3 +87,34 @@ fn the_debug_form_shows_no_key_material() {
     let shown = format!("{signer:?}");
     assert!(!shown.contains("171") && !shown.to_lowercase().contains("abab"));
 }
+
+#[test]
+fn no_current_or_previous_key_can_serve_two_purposes() {
+    let public = |seed| {
+        KeyFileSigner::from_key_bytes([(Purpose::Seal, vec![seed; 32])])
+            .unwrap()
+            .public_keys(Purpose::Seal)
+            .unwrap()
+            .current
+            .public_key
+    };
+    for (first_previous, second_previous) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let mut first = vec![if first_previous { 2 } else { 1 }; 32];
+        let mut second = vec![if second_previous { 3 } else { 1 }; 32];
+        if first_previous {
+            first.extend_from_slice(&public(1));
+        }
+        if second_previous {
+            second.extend_from_slice(&public(1));
+        }
+        assert!(
+            KeyFileSigner::from_key_bytes(
+                [(Purpose::Attestation, first), (Purpose::Seal, second),]
+            )
+            .is_err(),
+            "current/previous reuse {first_previous}/{second_previous}"
+        );
+    }
+}

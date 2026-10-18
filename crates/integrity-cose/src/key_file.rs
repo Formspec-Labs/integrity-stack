@@ -102,17 +102,28 @@ impl KeyFileSigner {
         }
         let mut seen: Vec<(Purpose, [u8; PUBLIC_KEY_BYTES])> = Vec::new();
         for (purpose, key) in &keys {
-            if let Some((other, _)) = seen
-                .iter()
-                .find(|(_, public)| *public == key.current.public_key)
-            {
-                return Err(SignError::InvalidKey(format!(
-                    "{other} and {purpose} share one public key"
-                )));
+            for public in std::iter::once(&key.current).chain(key.previous.as_ref()) {
+                if let Some((other, _)) = seen.iter().find(|(_, seen)| *seen == public.public_key) {
+                    return Err(SignError::InvalidKey(format!(
+                        "{other} and {purpose} share one public key"
+                    )));
+                }
+                seen.push((*purpose, public.public_key));
             }
-            seen.push((*purpose, key.current.public_key));
         }
         Ok(Self { keys })
+    }
+
+    /// Returns the public metadata for an already loaded purpose without doing I/O.
+    ///
+    /// # Errors
+    /// Returns [`SignError::NoKey`] when the purpose has no configured key.
+    pub fn public_keys(&self, purpose: Purpose) -> Result<PurposeKeys, SignError> {
+        let key = self.key(purpose)?;
+        Ok(PurposeKeys {
+            current: key.current.clone(),
+            previous: key.previous.clone(),
+        })
     }
 
     fn key(&self, purpose: Purpose) -> Result<&PurposeKey, SignError> {
@@ -136,10 +147,6 @@ impl PurposeSigner for KeyFileSigner {
     }
 
     async fn keys(&self, purpose: Purpose) -> Result<PurposeKeys, SignError> {
-        let key = self.key(purpose)?;
-        Ok(PurposeKeys {
-            current: key.current.clone(),
-            previous: key.previous.clone(),
-        })
+        self.public_keys(purpose)
     }
 }

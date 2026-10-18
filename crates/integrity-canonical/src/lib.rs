@@ -183,3 +183,30 @@ mod tests {
         ));
     }
 }
+
+/// Derives a 32-byte key using RFC 5869 HKDF-SHA256.
+///
+/// Callers own the stable salt and purpose-specific info. Distinct purposes must use distinct info.
+#[must_use]
+pub fn hkdf_sha256_32(input_key: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
+    let hkdf = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), input_key);
+    let mut output = [0_u8; 32];
+    // RFC 5869 permits up to 255 SHA-256 blocks; this fixed output is one block.
+    hkdf.expand(info, &mut output)
+        .expect("32 bytes fit HKDF-SHA256");
+    output
+}
+
+#[cfg(test)]
+mod hkdf_tests {
+    #[test]
+    fn rfc5869_case_one_first_block() {
+        // RFC 5869 Appendix A.1, truncated to the fixed 32-byte output length.
+        let salt: Vec<_> = (0x00..=0x0c).collect();
+        let info: Vec<_> = (0xf0..=0xf9).collect();
+        assert_eq!(
+            hex::encode(super::hkdf_sha256_32(&[0x0b; 22], &salt, &info)),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
+        );
+    }
+}

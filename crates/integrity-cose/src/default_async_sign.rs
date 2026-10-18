@@ -32,6 +32,36 @@ pub async fn default_async_sign(
     })
 }
 
+/// Signs an embedded-payload COSE seal through the configured purpose signer.
+///
+/// # Errors
+/// Refuses malformed key identifiers, signer failures, or a key change after preparing the header.
+pub async fn purpose_async_sign(
+    input: &SealInput,
+    signer: &dyn integrity_seam::PurposeSigner,
+    scope_key: &[u8; 32],
+) -> Result<SealedEnvelope, SealError> {
+    let kid = decode_hex_kid(&input.kid)?;
+    let protected = crate::protected_header_bytes(kid);
+    let structure = crate::sig_structure_bytes(&protected, &input.domain_separated_bytes);
+    let signed = signer
+        .sign(scope_key, integrity_seam::Purpose::Seal, &structure)
+        .await
+        .map_err(|error| SealError::Sign(error.to_string()))?;
+    if signed.kid != input.kid {
+        return Err(SealError::Sign(
+            "signer key changed after preparing seal header".into(),
+        ));
+    }
+    let sign1 = crate::sign1_bytes(&protected, &input.domain_separated_bytes, signed.signature);
+    Ok(SealedEnvelope {
+        domain: input.domain.clone(),
+        kid: input.kid.clone(),
+        cose_sign1_b64: STANDARD.encode(sign1),
+        canonical_event_hash: input.canonical_event_hash.clone(),
+    })
+}
+
 fn decode_hex_kid(kid: &str) -> Result<[u8; 16], SealError> {
     let bytes = hex::decode(kid).map_err(|error| SealError::Sign(format!("kid hex: {error}")))?;
     bytes.try_into().map_err(|bytes: Vec<u8>| {
