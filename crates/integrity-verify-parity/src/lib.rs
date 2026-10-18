@@ -10,12 +10,13 @@
 //! The projection is the structured report only: verdicts, failure kinds and
 //! locations, per-outcome fields (including certificate
 //! `attestation_authority`) and domain findings. Free-text warnings are not
-//! compared. The oracle runs with no external trust registry, so operator
-//! authority is only ever `unchecked` here, never `verified` or `failed`. The
-//! corpus is the committed `trellis/fixtures/vectors` export and tamper ZIPs; it
-//! has no v2 negative cases and no protected external payloads, so those paths
-//! are not covered by this gate. Passing means "agrees on this
-//! corpus", not "the two verifiers are equivalent".
+//! compared. The corpus is every ZIP under `trellis/fixtures/vectors`. When a
+//! ZIP's vector selects an external operator trust registry
+//! (`inputs.certificate_authorities` in its `manifest.toml`), both verifiers run
+//! with it, so authority reaches `verified` and `failed` as well as
+//! `unchecked`. Every ZIP runs in the strict phase, whatever its manifest's
+//! `inputs.verifier` selects. Passing means "agrees on this corpus", not "the
+//! two verifiers are equivalent".
 
 #![forbid(unsafe_code)]
 
@@ -209,8 +210,9 @@ pub fn run_parity_for_fixture(fixture_path: impl AsRef<Path>) -> Result<ParityRe
     let fixture_bytes = std::fs::read(fixture_path).map_err(|error| {
         ParityError::new(format!("read fixture {}: {error}", fixture_path.display()))
     })?;
-    let oracle = run_python_oracle(fixture_path)?;
-    let (target, metadata) = run_target(fixture_bytes);
+    let registry = certificate_authorities_path(fixture_path)?;
+    let oracle = run_python_oracle(fixture_path, registry.as_deref())?;
+    let (target, metadata) = run_target(fixture_bytes, registry.as_deref())?;
     let oracle_canonical = canonical_report_bytes(&oracle);
     let target_canonical = canonical_report_bytes(&target);
     let byte_identical = oracle_canonical == target_canonical;
@@ -234,7 +236,7 @@ pub fn canonical_report_bytes(report: &ReportProjection) -> Vec<u8> {
     serde_json::to_vec(&value).expect("canonical report JSON serializes")
 }
 
-fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> ReportProjection {
+fn project_target(report: trellis_verify_wos::WosVerificationReport) -> ReportProjection {
     let trellis = report.trellis;
     let posture_transitions = trellis
         .posture_transitions
@@ -361,7 +363,7 @@ fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> 
         correction_preservations,
         interop_sidecars,
         domain_findings: report
-            .domain_findings
+            .wos_findings
             .iter()
             .map(|finding| DomainFindingProjection {
                 kind: finding.kind.clone(),
@@ -373,15 +375,59 @@ fn project_target(report: integrity_verify::trellis::VerificationWithDomain) -> 
     }
 }
 
-fn run_target(fixture_bytes: Vec<u8>) -> (ReportProjection, TargetMetadata) {
-    let report = integrity_verify::trellis::verify_export_zip_with_validator(
-        &fixture_bytes,
-        &trellis_verify_wos::WosRecordValidator,
-    );
-    (project_target(report), collect_metadata(&fixture_bytes))
+fn run_target(
+    fixture_bytes: Vec<u8>,
+    registry: Option<&Path>,
+) -> Result<(ReportProjection, TargetMetadata), ParityError> {
+    let report = match registry {
+        None => trellis_verify_wos::verify_export_zip(&fixture_bytes),
+        Some(path) => {
+            let bytes = std::fs::read(path).map_err(|error| {
+                ParityError::new(format!("read registry {}: {error}", path.display()))
+            })?;
+            let registry = trellis_verify_wos::certificate_authorities_from_json(&bytes)
+                .map_err(|error| ParityError::new(format!("{}: {error}", path.display())))?;
+            trellis_verify_wos::verify_export_zip_with_certificate_authorities(
+                &fixture_bytes,
+                &registry,
+            )
+        }
+    };
+    Ok((project_target(report), collect_metadata(&fixture_bytes)))
 }
 
-fn run_python_oracle(fixture_path: &Path) -> Result<ReportProjection, ParityError> {
+/// The external operator trust registry the fixture's vector selects, if any.
+///
+/// The vector's `manifest.toml`, beside the ZIP, owns that choice through
+/// `inputs.certificate_authorities`; a ZIP without a manifest selects none.
+fn certificate_authorities_path(fixture_path: &Path) -> Result<Option<PathBuf>, ParityError> {
+    let manifest_path = fixture_path.with_file_name("manifest.toml");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let manifest: toml::Table = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            text.parse()
+                .map_err(|error: toml::de::Error| error.to_string())
+        })
+        .map_err(|error| {
+            ParityError::new(format!(
+                "read manifest {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    Ok(manifest
+        .get("inputs")
+        .and_then(|inputs| inputs.get("certificate_authorities"))
+        .and_then(toml::Value::as_str)
+        .map(|registry| fixture_path.with_file_name(registry)))
+}
+
+fn run_python_oracle(
+    fixture_path: &Path,
+    registry: Option<&Path>,
+) -> Result<ReportProjection, ParityError> {
     let trellis_root = trellis_repo_root();
     let mut command = Command::new("uv");
     command
@@ -392,7 +438,11 @@ fn run_python_oracle(fixture_path: &Path) -> Result<ReportProjection, ParityErro
         .arg("python")
         .arg("-m")
         .arg("trellis_py.parity_oracle")
-        .arg(fixture_path)
+        .arg(fixture_path);
+    if let Some(registry) = registry {
+        command.arg("--certificate-authorities").arg(registry);
+    }
+    command
         .current_dir(&trellis_root)
         .env("UV_PROJECT_ENVIRONMENT", oracle_environment());
 

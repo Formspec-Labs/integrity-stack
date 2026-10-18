@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use integrity_verify_parity::run_parity_for_fixture;
+use integrity_verify_parity::{ReportProjection, run_parity_for_fixture};
 
 #[test]
 fn known_export_fixture_runs_through_both_paths() {
@@ -41,6 +41,56 @@ fn target_path_matches_oracle_manifest_kid_failures() {
             .any(|failure| failure.kind == "unresolvable_manifest_kid"),
         "target path must preserve the production manifest-kid failure"
     );
+}
+
+/// Given the vectors for paths the corpus once lacked, then both verifiers reach each labelled
+/// outcome. Agreement alone would pass vacuously if the harness dropped a vector's registry.
+#[test]
+fn protected_payload_v2_negative_and_authority_vectors_reach_their_outcomes() {
+    let cases: [(&str, fn(&ReportProjection) -> bool); 5] = [
+        (
+            "export/019-assembled-native-external-attachment/expected-export.zip",
+            |report| report.integrity_verified && !report.readability_verified,
+        ),
+        (
+            "verify/046-export-015-certificate-v2-swapped-response-refs/input-export.zip",
+            |report| {
+                report
+                    .event_failures
+                    .iter()
+                    .any(|failure| failure.kind == "response_ref_mismatch")
+            },
+        ),
+        (
+            "verify/049-export-015-certificate-v2-duplicate-signing-events/input-export.zip",
+            |report| !report.structure_verified,
+        ),
+        (
+            "verify/043-export-015-operator-authority-verified/input-export.zip",
+            |report| authority(report) == ["verified"],
+        ),
+        (
+            "verify/044-export-015-operator-authority-wrong-key/input-export.zip",
+            |report| authority(report) == ["failed"],
+        ),
+    ];
+    for (vector, reached) in cases {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../trellis/fixtures/vectors")
+            .join(vector);
+        let report = run_parity_for_fixture(&fixture).expect("run independent parity harness");
+        assert!(report.byte_identical, "{vector}: {:?}", report.diff);
+        assert!(reached(&report.oracle), "{vector}: {:?}", report.oracle);
+        assert!(reached(&report.target), "{vector}: {:?}", report.target);
+    }
+}
+
+fn authority(report: &ReportProjection) -> Vec<&str> {
+    report
+        .certificates_of_completion
+        .iter()
+        .map(|outcome| outcome.attestation_authority.as_str())
+        .collect()
 }
 
 #[test]
