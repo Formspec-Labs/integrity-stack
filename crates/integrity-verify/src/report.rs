@@ -72,7 +72,7 @@ pub struct VerifyEvent<'a> {
 
 /// Optional canonical-bytes digest check the caller wants the universal
 /// phase to perform. The shape matches
-/// [`integrity_canonical::verify_signed_payload_digest`].
+/// [`integrity_canonical::verify_signed_payload_digest`] over the Response JSON text.
 pub struct CanonicalDigestCheck<'a> {
     /// Canonical-bytes representation (already JCS-canonicalized).
     pub bytes: &'a [u8],
