@@ -115,21 +115,31 @@ impl ResponseJson {
     ///
     /// Returns the errors of [`ResponseJson::parse`] for the result.
     pub fn with_member(&self, name: &str, member: &Value) -> Result<Self, String> {
-        let mut text = String::with_capacity(self.text.len() + 256);
-        text.push('{');
+        self.rewrite(name, Some(member))
+    }
+
+    /// Returns this Response without its top-level member `name`.
+    ///
+    /// Every other member keeps its text exactly as written.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ResponseJson::parse`] for the result.
+    pub fn without_member(&self, name: &str) -> Result<Self, String> {
+        self.rewrite(name, None)
+    }
+
+    fn rewrite(&self, name: &str, member: Option<&Value>) -> Result<Self, String> {
+        let mut parts = Vec::new();
         for (key, raw) in members(&self.text)? {
             if key != name {
-                text.push_str(&Value::String(key).to_string());
-                text.push(':');
-                text.push_str(raw.get());
-                text.push(',');
+                parts.push(format!("{}:{}", Value::String(key), raw.get()));
             }
         }
-        text.push_str(&Value::String(name.to_owned()).to_string());
-        text.push(':');
-        text.push_str(&member.to_string());
-        text.push('}');
-        Self::parse(text)
+        if let Some(member) = member {
+            parts.push(format!("{}:{member}", Value::String(name.to_owned())));
+        }
+        Self::parse(format!("{{{}}}", parts.join(",")))
     }
 }
 
@@ -387,6 +397,11 @@ mod tests {
             )
             .unwrap();
         assert!(signed_response.as_str().contains("1234567890.123456789"));
+        let unsigned = signed_response
+            .without_member("authoredSignatures")
+            .unwrap();
+        assert!(unsigned.value().get("authoredSignatures").is_none());
+        assert!(unsigned.as_str().contains("1234567890.123456789"));
     }
 
     #[test]
