@@ -45,7 +45,7 @@ export function parseJsonExact(text: string): unknown {
  * Preserves the complete JSON object, including authoredSignatures. The caller
  * hashes these bytes using genuine SHA-256; this function performs no crypto or
  * Response schema validation. Requires TextEncoder and String.isWellFormed.
- * Matches Rust `canonical_response_handoff_bytes_from_json` on the same JSON text
+ * Matches Rust `canonical_response_handoff_bytes` on the same JSON text
  * when the object comes from {@link parseJsonExact}.
  *
  * @throws TypeError for a non-object root, non-JSON runtime values, invalid

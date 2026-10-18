@@ -26,7 +26,7 @@ npm run test -w packages/integrity-canonical
 npm run typecheck -w packages/integrity-canonical
 ```
 
-Byte fixtures shared with the Rust authority live at `tests/fixtures/response-handoff/vectors.json`. Both runtimes read each input as text: TypeScript through `parseJsonExact`, Rust through `canonical_response_handoff_bytes_from_json`. Rust parity runs with `cargo test --offline --locked -p integrity-canonical --test response_handoff_vectors`. Python fixture reproduction, input scope and oracle provenance are documented beside those fixtures.
+Byte fixtures shared with the Rust authority live at `tests/fixtures/response-handoff/vectors.json`. Both runtimes read each input as text: TypeScript through `parseJsonExact`, Rust through `canonical_response_handoff_bytes` (or `ResponseJson`). Rust parity runs with `cargo test --offline --locked -p integrity-canonical --test response_handoff_vectors`. Python fixture reproduction, input scope and oracle provenance are documented beside those fixtures.
 
 For `signedPayload.digest`, use the signing export and genuine SHA-256. The digest is lowercase hex without the handoff's `sha256:` prefix:
 
@@ -39,6 +39,6 @@ const digest = Array.from(new Uint8Array(hash),
   byte => byte.toString(16).padStart(2, '0')).join('');
 ```
 
-Signing bytes match Rust `canonical_response_signed_payload_bytes_from_json` / `build_signed_payload_from_json`: UTF-8 `formspec.response.signed-payload.v1`, one NUL byte, then the canonical JSON of the Response with only top-level `authoredSignatures` omitted. Every other member remains, including nested members of that name. Both APIs snapshot validated own data descriptors recursively before serialization or omission, including malformed Unicode within omitted signatures; neither mutates the input. The serializer receives only the admitted snapshot, preventing later Proxy value reads or serialization hooks from replacing checked data. Descriptor inspection can itself execute Proxy traps; this API is not an isolation boundary for executable JavaScript. Byte production performs no hashing, signing, verification or Response schema validation. The caller supplies all required signing metadata pins separately.
+Signing bytes match Rust `canonical_response_signed_payload_bytes` / `build_signed_payload` (both read Response JSON text): UTF-8 `formspec.response.signed-payload.v1`, one NUL byte, then the canonical JSON of the Response with only top-level `authoredSignatures` omitted. Every other member remains, including nested members of that name. Both APIs snapshot validated own data descriptors recursively before serialization or omission, including malformed Unicode within omitted signatures; neither mutates the input. The serializer receives only the admitted snapshot, preventing later Proxy value reads or serialization hooks from replacing checked data. Descriptor inspection can itself execute Proxy traps; this API is not an isolation boundary for executable JavaScript. Byte production performs no hashing, signing, verification or Response schema validation. The caller supplies all required signing metadata pins separately.
 
 Shared independent signing vectors live at `tests/fixtures/response-signing/vectors.json`. Rust parity uses `cargo test --offline --locked -p integrity-canonical --test response_signing_vectors`.
