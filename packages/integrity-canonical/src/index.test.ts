@@ -175,6 +175,19 @@ describe('exact decimal numbers', () => {
       expect(text(rawJSON(String(value)))).toBe(text(value));
     }
   });
+  it('lays out a 1 MB number in well under a second, once per number', () => {
+    const zeros = '0'.repeat(1 << 20);
+    for (const [raw, expected] of [
+      [`1.${zeros}1`, `1.${zeros}1`],
+      [`1${zeros}e-${1 << 20}`, '1'],
+      [`0.${zeros}5e+${1 << 20}`, '0.5'],
+    ]) {
+      const started = performance.now();
+      const parsed = parseJsonExact(`{"n":${raw}}`);
+      expect(text(parsed)).toBe(`{"n":${expected}}`);
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
   it('refuses raw values that are not numbers or lie outside the binary64 range', () => {
     for (const raw of ['1e400', '-1e-400', '"x"', 'true', 'null']) {
       expect(() => canonicalJsonBytes({ data: rawJSON(raw) }), raw).toThrow(TypeError);

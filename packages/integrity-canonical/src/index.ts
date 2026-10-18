@@ -83,7 +83,12 @@ export function canonicalJsonBytes(value: unknown): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(serialize(jsonSnapshot(value, new Set())));
 }
 
-type JsonValue = null | string | boolean | number | RawJson | JsonValue[] | { [key: string]: JsonValue };
+type JsonValue = null | string | boolean | number | CanonicalNumber | JsonValue[] | { [key: string]: JsonValue };
+
+/** A raw number already laid out canonically by admission, so serialization never lays it out twice. */
+class CanonicalNumber {
+  constructor(readonly text: string) {}
+}
 
 function responseSnapshot(response: unknown): Record<string, JsonValue> {
   if (response === null || typeof response !== 'object' || Array.isArray(response) || isRawJson(response)) {
@@ -102,7 +107,7 @@ function serialize(value: JsonValue): string {
   if (value === null) return 'null';
   if (typeof value === 'string' || typeof value === 'number') return JSON.stringify(value);
   if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (isRawJson(value)) return canonicalNumber(value.rawJSON);
+  if (value instanceof CanonicalNumber) return value.text;
   if (Array.isArray(value)) return `[${Array.prototype.map.call(value, serialize).join(',')}]`;
   const object = value as { [key: string]: JsonValue };
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${serialize(object[key])}`).join(',')}}`;
@@ -114,26 +119,82 @@ function serialize(value: JsonValue): string {
  * ECMA-262 §6.1.6.1.20 lays out the digits `s` (`k` of them, no trailing zeros) of a
  * value `s × 10^(n−k)`; RFC 8785 takes `s` from the nearest double, this takes it
  * from the text. Magnitudes a double cannot hold are refused, as RFC 8785 refuses them.
+ * One left-to-right scan validates the grammar and finds the parts; work and memory
+ * are linear in the text.
  */
 function canonicalNumber(text: string): string {
-  const match = /^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/.exec(text);
-  if (!match) throw new TypeError('response contains a non-number raw JSON value');
-  const magnitude = Number(text);
-  if (!Number.isFinite(magnitude)) throw new TypeError('response number is outside the binary64 range');
-  const [, sign, integer, fraction = '', exponent = '0'] = match;
-  const significant = (integer + fraction).replace(/^0+/, '');
-  if (significant === '') return '0';
-  if (magnitude === 0) throw new TypeError('response number is outside the binary64 range');
-  const digits = significant.replace(/0+$/, '');
+  const refuse = (): never => { throw new TypeError('response contains a non-number raw JSON value'); };
+  const isDigit = (index: number): boolean => {
+    const code = text.charCodeAt(index);
+    return code >= 48 && code <= 57;
+  };
+  const length = text.length;
+  let index = text.charCodeAt(0) === 45 ? 1 : 0;
+  const negative = index === 1;
+  const integerStart = index;
+  if (text.charCodeAt(index) === 48) index += 1;
+  else if (isDigit(index)) while (isDigit(index)) index += 1;
+  else refuse();
+  const integerEnd = index;
+  let fractionStart = index;
+  let fractionEnd = index;
+  if (text.charCodeAt(index) === 46) {
+    fractionStart = index + 1;
+    index = fractionStart;
+    while (isDigit(index)) index += 1;
+    fractionEnd = index;
+    if (fractionEnd === fractionStart) refuse();
+  }
+  let exponentSign = 1;
+  let exponentStart = index;
+  let exponentEnd = index;
+  const marker = text.charCodeAt(index);
+  if (marker === 101 || marker === 69) {
+    index += 1;
+    if (text.charCodeAt(index) === 43 || text.charCodeAt(index) === 45) {
+      if (text.charCodeAt(index) === 45) exponentSign = -1;
+      index += 1;
+    }
+    exponentStart = index;
+    while (isDigit(index)) index += 1;
+    exponentEnd = index;
+    if (exponentEnd === exponentStart) refuse();
+  }
+  if (index !== length) refuse();
+
+  const firstNonZero = (from: number, to: number): number => {
+    for (let at = from; at < to; at += 1) if (text.charCodeAt(at) !== 48) return at;
+    return -1;
+  };
+  const lastNonZero = (from: number, to: number): number => {
+    for (let at = to - 1; at >= from; at -= 1) if (text.charCodeAt(at) !== 48) return at;
+    return -1;
+  };
+  const firstInInteger = firstNonZero(integerStart, integerEnd);
+  const first = firstInInteger >= 0 ? firstInInteger : firstNonZero(fractionStart, fractionEnd);
+  if (first < 0) return '0';
+  const lastInFraction = lastNonZero(fractionStart, fractionEnd);
+  const last = lastInFraction >= 0 ? lastInFraction : lastNonZero(integerStart, integerEnd);
+  const digits = firstInInteger >= 0 && lastInFraction >= 0
+    ? text.slice(first, integerEnd) + text.slice(fractionStart, last + 1)
+    : text.slice(first, last + 1);
   const k = digits.length;
-  // The finite, nonzero magnitude bounds n to a few hundred, so this stays exact.
-  const n = Number(exponent) - fraction.length + (significant.length - k) + k;
+  let exponent = 0;
+  for (let at = exponentStart; at < exponentEnd && exponent < 1e15; at += 1) {
+    exponent = exponent * 10 + text.charCodeAt(at) - 48;
+  }
+  // value = 0.digits × 10^n
+  const n = exponentSign * exponent + (firstInInteger >= 0 ? integerEnd - first : fractionStart - first);
+  const magnitude = Number(text);
+  if (!Number.isFinite(magnitude) || magnitude === 0) {
+    throw new TypeError('response number is outside the binary64 range');
+  }
   let body: string;
   if (k <= n && n <= 21) body = digits + '0'.repeat(n - k);
   else if (0 < n && n <= 21) body = `${digits.slice(0, n)}.${digits.slice(n)}`;
   else if (-6 < n && n <= 0) body = `0.${'0'.repeat(-n)}${digits}`;
   else body = `${digits[0]}${k > 1 ? `.${digits.slice(1)}` : ''}e${n > 0 ? '+' : '-'}${Math.abs(n - 1)}`;
-  return sign + body;
+  return negative ? `-${body}` : body;
 }
 
 // Admission checking: serialize only admitted descriptor values, so runtime
@@ -145,10 +206,7 @@ function jsonSnapshot(value: unknown, ancestors: Set<object>): JsonValue {
   }
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (isRawJson(value)) {
-    canonicalNumber(value.rawJSON);
-    return value;
-  }
+  if (isRawJson(value)) return new CanonicalNumber(canonicalNumber(value.rawJSON));
   if (typeof value !== 'object') {
     throw new TypeError('response contains a non-JSON value');
   }
