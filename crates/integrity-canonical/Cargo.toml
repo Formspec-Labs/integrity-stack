@@ -16,5 +16,5 @@ serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 sha2 = "0.10"
 
 [dev-dependencies]
-# Derives an untagged enum in a test, as formspec-server-ports does.
+# Derives an untagged enum in a test, to show ResponseJson refuses serde's buffered values.
 serde = { version = "1", features = ["derive"] }

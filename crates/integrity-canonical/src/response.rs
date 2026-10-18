@@ -9,7 +9,7 @@
 use std::fmt;
 
 use serde::de::Error as _;
-use serde::de::{MapAccess, Visitor};
+use serde::de::{DeserializeSeed, MapAccess, Visitor};
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -30,7 +30,9 @@ const AUTHORED_SIGNATURES: &str = "authoredSignatures";
 /// counts. [`ResponseJson::value`] is a parsed view for reading fields; its
 /// numbers are `f64` and it must never be re-encoded for a commitment. Serde
 /// writes and reads the text verbatim (through `serde_json`'s `RawValue`), so a
-/// record that stores or sends a `ResponseJson` keeps its digits.
+/// record that stores or sends a `ResponseJson` keeps its digits. Reading it
+/// back requires the JSON text: a `serde_json::Value` or an untagged enum is
+/// refused, because its numbers are already rounded.
 #[derive(Clone)]
 pub struct ResponseJson {
     text: String,
@@ -182,37 +184,53 @@ impl Serialize for ResponseJson {
 /// stops recognizing it, because the text would then lose its digits.
 const RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
 
+/// Why a source without the Response's JSON text is refused.
+const TEXT_REQUIRED: &str = "Response JSON text is required: a parsed value has already rounded \
+    its numbers, so deserialize from the JSON text (serde_json::from_str or from_slice)";
+
 impl<'de> Deserialize<'de> for ResponseJson {
-    /// Keeps the exact text when `serde_json` reads it. A deserializer that
-    /// has already parsed the value, such as serde's buffering for untagged
-    /// enums, yields the value, which is written back as text (as `from_value`).
+    /// Reads the Response's exact JSON text, borrowed from the input that
+    /// `serde_json::from_str` or `from_slice` is reading.
+    ///
+    /// Every other source is refused, never rounded. A `serde_json::Value`
+    /// (`from_value`), serde's buffering for untagged or internally tagged enums,
+    /// and `from_reader` all hand over text re-written from numbers already
+    /// parsed to `f64`, which would commit to different digits than were signed.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Accepts only text borrowed from the input itself.
+        struct InputText;
+        impl<'de> Visitor<'de> for InputText {
+            type Value = &'de str;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(TEXT_REQUIRED)
+            }
+            fn visit_borrowed_str<E: serde::de::Error>(self, text: &'de str) -> Result<&'de str, E> {
+                Ok(text)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<&'de str, E> {
+                Err(E::custom(TEXT_REQUIRED))
+            }
+        }
+        impl<'de> DeserializeSeed<'de> for InputText {
+            type Value = &'de str;
+            fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<&'de str, D::Error> {
+                deserializer.deserialize_str(self)
+            }
+        }
         struct ResponseVisitor;
         impl<'de> Visitor<'de> for ResponseVisitor {
             type Value = ResponseJson;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a Formspec Response JSON object")
+                formatter.write_str(TEXT_REQUIRED)
             }
-            fn visit_newtype_struct<D: Deserializer<'de>>(
-                self,
-                deserializer: D,
-            ) -> Result<Self::Value, D::Error> {
-                ResponseJson::from_value(&Value::deserialize(deserializer)?)
-                    .map_err(D::Error::custom)
+            fn visit_newtype_struct<D: Deserializer<'de>>(self, _: D) -> Result<Self::Value, D::Error> {
+                Err(D::Error::custom(TEXT_REQUIRED))
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut object = serde_json::Map::new();
-                if let Some(key) = map.next_key::<String>()? {
-                    if key == RAW_VALUE_TOKEN {
-                        let text: String = map.next_value()?;
-                        return ResponseJson::parse(text).map_err(A::Error::custom);
-                    }
-                    object.insert(key, map.next_value()?);
+                if map.next_key::<&str>()? != Some(RAW_VALUE_TOKEN) {
+                    return Err(A::Error::custom(TEXT_REQUIRED));
                 }
-                while let Some((key, value)) = map.next_entry::<String, Value>()? {
-                    object.insert(key, value);
-                }
-                ResponseJson::from_value(&Value::Object(object)).map_err(A::Error::custom)
+                ResponseJson::parse(map.next_value_seed(InputText)?).map_err(A::Error::custom)
             }
         }
         deserializer.deserialize_newtype_struct(RAW_VALUE_TOKEN, ResponseVisitor)
@@ -428,17 +446,29 @@ mod tests {
         let restored: Vec<ResponseJson> = serde_json::from_str(&record).unwrap();
         assert_eq!(restored[0].handoff_bytes().unwrap(), handoff);
         assert!(restored[0].as_str().contains("1234567890.123456789"));
-        // From an already parsed value (serde_json::from_value, untagged enums) the
-        // Response is admitted from that value.
-        let from_value: ResponseJson = serde_json::from_value(response.value().clone()).unwrap();
-        assert_eq!(from_value.value(), response.value());
-        #[derive(Deserialize)]
+        // Sources whose numbers are already parsed are refused, never rounded:
+        // a Value (from_value, either form), serde's untagged buffering and a reader.
+        let parsed: Value = serde_json::from_str(response.as_str()).unwrap();
+        for refused in [
+            serde_json::from_value::<ResponseJson>(parsed.clone()).unwrap_err(),
+            ResponseJson::deserialize(&parsed).unwrap_err(),
+            serde_json::from_reader::<_, ResponseJson>(response.as_str().as_bytes()).unwrap_err(),
+        ] {
+            assert!(refused.to_string().contains("Response JSON text is required"), "{refused}");
+        }
+        #[derive(Debug, Deserialize)]
         #[serde(untagged)]
         enum Either {
+            #[allow(dead_code, reason = "only its refusal is tested")]
             Response(ResponseJson),
         }
-        let Either::Response(untagged) = serde_json::from_str::<Either>(response.as_str()).unwrap();
-        assert_eq!(untagged.value(), response.value());
+        assert!(serde_json::from_str::<Either>(response.as_str()).is_err());
+        // A RawValue borrowed from text, and a struct read from bytes, keep the text.
+        let raw: &RawValue = serde_json::from_str(response.as_str()).unwrap();
+        let from_raw: ResponseJson = serde_json::from_str(raw.get()).unwrap();
+        assert!(from_raw.as_str().contains("1234567890.123456789"));
+        let from_bytes: Vec<ResponseJson> = serde_json::from_slice(record.as_bytes()).unwrap();
+        assert_eq!(from_bytes[0], response);
         let signed_response = response
             .with_member(
                 "authoredSignatures",
