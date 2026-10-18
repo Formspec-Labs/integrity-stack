@@ -162,6 +162,20 @@ describe('exact decimal numbers', () => {
     expect(text(parsed)).toBe('{"amount":1234567890.123456789,"big":9007199254740993,"rate":0.1}');
     expect(text(JSON.parse('{"amount":1234567890.123456789}'))).toBe('{"amount":1234567890.1234567}');
   });
+  it('keeps a number plain unless its canonical form differs from the JS number text', () => {
+    const parsed = parseJsonExact('{"a":1.50,"b":1e2,"c":1234567890.123456789,"d":-0.0,"e":1152921504606846976,"f":1e400}') as Record<string, unknown>;
+    expect(parsed.a).toBe(1.5); expect(String(parsed.a)).toBe('1.5');
+    expect(parsed.b).toBe(100); expect((parsed.b as number) + 1).toBe(101);
+    expect(Object.is(parsed.d, -0)).toBe(true);
+    // A 19-digit decimal and 2^60 written in full keep their digits; the canonical bytes do not change.
+    expect(JSON.stringify(parsed.c)).toBe('1234567890.123456789');
+    expect(JSON.stringify(parsed.e)).toBe('1152921504606846976');
+    expect(text({ a: parsed.a, b: parsed.b, c: parsed.c, e: parsed.e })).toBe('{"a":1.5,"b":100,"c":1234567890.123456789,"e":1152921504606846976}');
+    expect(text({ a: rawJSON('1.50'), b: rawJSON('1e2') })).toBe(text({ a: parsed.a, b: parsed.b }));
+    // Out of range stays as written, for the byte functions to refuse.
+    expect(JSON.stringify(parsed.f)).toBe('1e400');
+    expect(() => canonicalJsonBytes(parsed)).toThrow(TypeError);
+  });
   it('lays out raw numbers like Number::toString and agrees with JS numbers a double holds', () => {
     for (const [raw, expected] of [
       ['-0.000e5', '0'], ['4.50', '4.5'], ['123e-2', '1.23'], ['0.000001', '0.000001'], ['1e-7', '1e-7'],

@@ -21,10 +21,15 @@ const isRawJson = (value: unknown): value is RawJson => json.isRawJSON?.(value) 
 /**
  * Parses JSON text without losing number digits.
  *
- * A number stays a JS number when its source text is exactly that number's own
- * text; otherwise it becomes `JSON.rawJSON(source)`, which the canonical byte
- * functions write with every digit. `JSON.parse` keeps the last of repeated
- * member names; Rust's text functions refuse them.
+ * A number stays a plain JS number whenever its canonical form is that number's
+ * own text, so `1.50` reads as 1.5 and `1e2` as 100, and UI code can treat it as
+ * a number. Only a number whose canonical form differs becomes
+ * `JSON.rawJSON(canonical form)`, which the canonical byte functions write with
+ * every digit: digits a double cannot hold, such as a 19-digit decimal, or an
+ * integer written in full past 2^53. Either way the canonical bytes are the
+ * same. A number outside the binary64 range is kept as written, for the byte
+ * functions to refuse. `JSON.parse` keeps the last of repeated member names;
+ * Rust's text functions refuse them.
  *
  * @throws SyntaxError for invalid JSON; TypeError where the runtime lacks source text access.
  */
@@ -35,7 +40,11 @@ export function parseJsonExact(text: string): unknown {
     if (typeof value !== 'number') return value;
     const source = context?.source;
     if (source === undefined) throw new TypeError('runtime lacks JSON.parse source text access');
-    return source === JSON.stringify(value) ? value : rawJSON(source);
+    const own = JSON.stringify(value);
+    if (source === own) return value;
+    let canonical: string;
+    try { canonical = canonicalNumber(source); } catch { return rawJSON(source); }
+    return canonical === own ? value : rawJSON(canonical);
   });
 }
 
