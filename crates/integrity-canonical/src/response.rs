@@ -150,6 +150,13 @@ impl fmt::Debug for ResponseJson {
     }
 }
 
+/// Writes the Response JSON text exactly as held, so storing `to_string()` keeps every digit.
+impl fmt::Display for ResponseJson {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
 impl Serialize for ResponseJson {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serde_json::from_str::<&RawValue>(&self.text)
@@ -360,6 +367,7 @@ mod tests {
         assert_eq!(reread, response);
         assert_eq!(reread.value()["id"], "r-1");
         assert!(reread.as_str().contains("1234567890.123456789"));
+        assert_eq!(reread.to_string(), reread.as_str());
         let signed = response.signed_payload(DigestAlgorithm::Sha256).unwrap();
         let signed_json =
             std::str::from_utf8(&signed.canonical_bytes[DOMAIN_SEPARATION.len() + 1..]).unwrap();
