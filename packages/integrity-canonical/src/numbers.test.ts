@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { canonicalJsonBytes } from './index.js';
 
 const { rawJSON } = JSON as unknown as { rawJSON(text: string): unknown };
-const vectors: { valid: [string, string][]; invalid: string[] } = JSON.parse(
+const vectors: { valid: [string, string][]; invalid: string[]; differential: [string, string | null][] } = JSON.parse(
   readFileSync(new URL('../../../tests/fixtures/canonical-numbers/vectors.json', import.meta.url), 'utf8'),
 );
 const text = (value: unknown) => new TextDecoder().decode(canonicalJsonBytes(value));
@@ -14,5 +14,13 @@ describe('shared number vectors (tests/fixtures/canonical-numbers)', () => {
   });
   it('refuses every invalid number', () => {
     for (const input of vectors.invalid) expect(() => text(rawJSON(input)), input).toThrow();
+  });
+  it('agrees with the Python oracle on 2000 seeded random numbers', () => {
+    expect(vectors.differential.length).toBeGreaterThanOrEqual(2000);
+    for (const [input, expected] of vectors.differential) {
+      let actual: string | null;
+      try { actual = text(rawJSON(input)); } catch { actual = null; }
+      expect(actual, input).toBe(expected);
+    }
   });
 });

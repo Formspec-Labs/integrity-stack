@@ -32,3 +32,19 @@ fn numbers_match_the_shared_oracle() {
         );
     }
 }
+
+#[test]
+fn random_numbers_agree_with_the_python_oracle() {
+    let vectors = fixture();
+    let cases = vectors["differential"]
+        .as_array()
+        .expect("differential cases");
+    assert!(cases.len() >= 2000);
+    for case in cases {
+        let input = case[0].as_str().expect("input");
+        let actual = canonical_json_from_bytes(input.as_bytes())
+            .ok()
+            .map(|bytes| String::from_utf8(bytes).unwrap());
+        assert_eq!(actual.as_deref(), case[1].as_str(), "{input}");
+    }
+}

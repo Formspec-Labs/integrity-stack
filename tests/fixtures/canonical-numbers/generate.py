@@ -1,10 +1,12 @@
 """Shared number vectors for integrity-canonical-json-v1, derived by ../exact_jcs.py.
 
-Writes vectors.json beside this file. With --check it writes nothing and fails
+Writes vectors.json beside this file: edge cases, then 2000 seeded random
+numbers ("differential", null where refused) that Rust and TypeScript must match. With --check it writes nothing and fails
 unless the committed file matches. Either way it first checks that three 1 MB
 numbers lay out in well under a second, so the oracle stays linear.
 """
 import json
+import random
 import sys
 import time
 from pathlib import Path
@@ -42,12 +44,32 @@ for text in refused:
         invalid.append(text)
     else:
         raise AssertionError(f"{text} must be refused")
+# Differential cases: seeded random numbers, many near the precision and range edges.
+rng = random.Random(20261017)
+
+
+def random_number() -> str:
+    sign = rng.choice(["", "-"])
+    integer = rng.choice(["0", str(rng.randint(1, 9)) + "".join(rng.choice("0123456789") for _ in range(rng.randint(0, 30)))])
+    fraction = "" if rng.random() < 0.3 else "." + "".join(rng.choice("0000123456789") for _ in range(rng.randint(1, 30)))
+    exponent = "" if rng.random() < 0.4 else rng.choice("eE") + rng.choice(["", "+", "-"]) + str(rng.choice([rng.randint(0, 25), rng.randint(280, 345)]))
+    return sign + integer + fraction + exponent
+
+
+differential = []
+for _ in range(2000):
+    text = random_number()
+    try:
+        differential.append([text, exact_jcs.exact_number(text)])
+    except exact_jcs.OutOfRange:
+        differential.append([text, None])
 fixture = json.dumps({
     "profile": "integrity-canonical-json-v1 numbers",
     "oracle": "tests/fixtures/exact_jcs.py (rfc8785 0.1.4 cross-check)",
     "notes": "Each valid input is one JSON number document and its canonical text. Out of range means a nonzero value that binary64 round-to-nearest-even takes to zero (magnitude <= 2^-1075) or infinity (magnitude >= 2^1024 - 2^970); exponents are read up to 10^15.",
     "valid": valid,
     "invalid": invalid,
+    "differential": differential,
 }, indent=1) + "\n"
 target = Path(__file__).with_name("vectors.json")
 if "--check" in sys.argv:
