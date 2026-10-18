@@ -9,6 +9,7 @@
 use std::fmt;
 
 use serde::de::Error as _;
+use serde::de::{MapAccess, Visitor};
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -175,10 +176,46 @@ impl Serialize for ResponseJson {
     }
 }
 
+/// The newtype name through which `serde_json` hands a `RawValue` its exact text.
+///
+/// It is `serde_json`'s private `RawValue` token. A test fails if `serde_json`
+/// stops recognizing it, because the text would then lose its digits.
+const RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
+
 impl<'de> Deserialize<'de> for ResponseJson {
+    /// Keeps the exact text when `serde_json` reads it. A deserializer that
+    /// has already parsed the value, such as serde's buffering for untagged
+    /// enums, yields the value, which is written back as text (as `from_value`).
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = Box::<RawValue>::deserialize(deserializer)?;
-        Self::parse(String::from(Box::<str>::from(raw))).map_err(D::Error::custom)
+        struct ResponseVisitor;
+        impl<'de> Visitor<'de> for ResponseVisitor {
+            type Value = ResponseJson;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Formspec Response JSON object")
+            }
+            fn visit_newtype_struct<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                ResponseJson::from_value(&Value::deserialize(deserializer)?)
+                    .map_err(D::Error::custom)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut object = serde_json::Map::new();
+                if let Some(key) = map.next_key::<String>()? {
+                    if key == RAW_VALUE_TOKEN {
+                        let text: String = map.next_value()?;
+                        return ResponseJson::parse(text).map_err(A::Error::custom);
+                    }
+                    object.insert(key, map.next_value()?);
+                }
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    object.insert(key, value);
+                }
+                ResponseJson::from_value(&Value::Object(object)).map_err(A::Error::custom)
+            }
+        }
+        deserializer.deserialize_newtype_struct(RAW_VALUE_TOKEN, ResponseVisitor)
     }
 }
 
@@ -390,6 +427,18 @@ mod tests {
         assert!(record.contains("1234567890.123456789"));
         let restored: Vec<ResponseJson> = serde_json::from_str(&record).unwrap();
         assert_eq!(restored[0].handoff_bytes().unwrap(), handoff);
+        assert!(restored[0].as_str().contains("1234567890.123456789"));
+        // From an already parsed value (serde_json::from_value, untagged enums) the
+        // Response is admitted from that value.
+        let from_value: ResponseJson = serde_json::from_value(response.value().clone()).unwrap();
+        assert_eq!(from_value.value(), response.value());
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Response(ResponseJson),
+        }
+        let Either::Response(untagged) = serde_json::from_str::<Either>(response.as_str()).unwrap();
+        assert_eq!(untagged.value(), response.value());
         let signed_response = response
             .with_member(
                 "authoredSignatures",

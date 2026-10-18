@@ -14,3 +14,7 @@ serde = "1"
 # for every graph that holds this crate; raw_value lets the text API keep number text exact.
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 sha2 = "0.10"
+
+[dev-dependencies]
+# Derives an untagged enum in a test, as formspec-server-ports does.
+serde = { version = "1", features = ["derive"] }
