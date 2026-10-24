@@ -576,6 +576,71 @@ impl RingVerifier {
     }
 }
 
+/// COSE `alg` for EdDSA (RFC 9053 §2.2), the only algorithm an Ed25519 key signs under.
+const COSE_ALG_EDDSA: i32 = -8;
+
+/// Ed25519 key pair held in process memory, parsed from PKCS#8.
+///
+/// Signs the detached COSE_Sign1 consumer envelope (`alg`, `kid`, method URI;
+/// ADR 0109) that [`RingVerifier`] checks, so callers outside this crate sign
+/// without depending on ring. The same custody caveat as
+/// [`InProcessReceiptSigner`] applies: tests, conformance fixtures and local
+/// reference servers only.
+pub struct InProcessEd25519Key {
+    key_pair: signature::Ed25519KeyPair,
+}
+
+impl InProcessEd25519Key {
+    /// Parses an unencrypted Ed25519 PKCS#8 v2 document.
+    ///
+    /// ring requires the v2 form, which carries the public key, and checks that
+    /// it matches the private seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReceiptSignerError::KeyUnavailable`] when ring rejects the
+    /// bytes as an Ed25519 PKCS#8 v2 document.
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, ReceiptSignerError> {
+        signature::Ed25519KeyPair::from_pkcs8(pkcs8)
+            .map(|key_pair| Self { key_pair })
+            .map_err(|e| ReceiptSignerError::KeyUnavailable {
+                reason: format!("ed25519 pkcs8 parse: {e}"),
+            })
+    }
+
+    /// Returns the raw 32-byte Ed25519 public key.
+    pub fn public_key_bytes(&self) -> &[u8] {
+        self.key_pair.public_key().as_ref()
+    }
+
+    /// Signs `payload` as a detached COSE_Sign1 under `kid` and `method_uri`.
+    ///
+    /// The envelope carries no payload; verifiers rebuild the `Sig_structure`
+    /// from the bytes they hold. Ed25519 is deterministic, so the same inputs
+    /// always yield the same envelope.
+    pub fn sign_detached_cose_sign1(
+        &self,
+        kid: &[u8],
+        method_uri: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let protected =
+            integrity_cose::detached_signature_protected_header(COSE_ALG_EDDSA, kid, method_uri);
+        let signature = self
+            .key_pair
+            .sign(&integrity_cose::sig_structure_bytes(&protected, payload));
+        integrity_cose::encode_cose_sign1(&protected, None, signature.as_ref())
+    }
+}
+
+impl std::fmt::Debug for InProcessEd25519Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InProcessEd25519Key")
+            .field("public_key", &self.public_key_bytes())
+            .finish()
+    }
+}
+
 /// Minimal in-process [`ReceiptSigner`] backed by ring's Ed25519 keypair.
 ///
 /// Holds the private key in process memory. Suitable for tests, local
@@ -586,7 +651,7 @@ impl RingVerifier {
 /// [`ReceiptSigner`] port keeps that substitution local to the
 /// composition root.
 pub struct InProcessReceiptSigner {
-    key_pair: signature::Ed25519KeyPair,
+    key: InProcessEd25519Key,
     /// Optional COSE `kid` bytes. `None` (absent kid) is wire-distinct from
     /// `Some(vec![])` (present-but-empty kid); previously the field used
     /// `Vec::is_empty()` as the absence sentinel which collapsed those two
@@ -616,8 +681,26 @@ impl InProcessReceiptSigner {
         signer_id: impl Into<String>,
         receipt_method_uri: impl Into<String>,
     ) -> Self {
+        Self::from_key_with_identity(
+            InProcessEd25519Key { key_pair },
+            kid,
+            signer_id,
+            receipt_method_uri,
+        )
+    }
+
+    /// Wraps a parsed in-process key as a receipt signer with an explicit identity.
+    ///
+    /// Callers holding PKCS#8 key material use this instead of
+    /// [`Self::new_with_identity`], so they need no ring dependency of their own.
+    pub fn from_key_with_identity(
+        key: InProcessEd25519Key,
+        kid: Option<&[u8]>,
+        signer_id: impl Into<String>,
+        receipt_method_uri: impl Into<String>,
+    ) -> Self {
         Self {
-            key_pair,
+            key,
             kid: kid.map(<[u8]>::to_vec),
             signer_id: signer_id.into(),
             receipt_method_uri: receipt_method_uri.into(),
@@ -652,21 +735,17 @@ impl InProcessReceiptSigner {
                 reason: format!("ed25519 keygen: {e}"),
             }
         })?;
-        let key_pair = signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|e| {
-            ReceiptSignerError::KeyUnavailable {
-                reason: format!("ed25519 pkcs8 parse: {e}"),
-            }
-        })?;
-        let public_key_bytes = key_pair.public_key().as_ref().to_vec();
+        let key = InProcessEd25519Key::from_pkcs8(pkcs8.as_ref())?;
+        let public_key_bytes = key.public_key_bytes().to_vec();
         Ok((
-            Self::new_with_identity(key_pair, kid, signer_id, receipt_method_uri),
+            Self::from_key_with_identity(key, kid, signer_id, receipt_method_uri),
             public_key_bytes,
         ))
     }
 
     /// Returns the raw Ed25519 public-key bytes for the embedded keypair.
     pub fn public_key_bytes(&self) -> &[u8] {
-        self.key_pair.public_key().as_ref()
+        self.key.public_key_bytes()
     }
 }
 
@@ -679,17 +758,10 @@ impl ReceiptSigner for InProcessReceiptSigner {
                 reason: "receipt-signing requires a kid per ADR 0109 consumer envelope shape"
                     .to_string(),
             })?;
-        let protected = integrity_cose::detached_signature_protected_header(
-            -8,
+        Ok(self.key.sign_detached_cose_sign1(
             kid_slice,
             &self.receipt_method_uri,
-        );
-        let sig_structure = integrity_cose::sig_structure_bytes(&protected, canonical_payload);
-        let signature = self.key_pair.sign(&sig_structure);
-        Ok(integrity_cose::encode_cose_sign1(
-            &protected,
-            None,
-            signature.as_ref(),
+            canonical_payload,
         ))
     }
 
@@ -2127,5 +2199,109 @@ mod tests {
             resolver.resolve(&KeyRef::Kid(b"absent".to_vec())),
             Err(KeyResolverError::KeyNotFound { .. })
         ));
+    }
+
+    // ---------- In-process Ed25519 key from PKCS#8 (fs-dlou) ----------
+
+    /// Returns a ring-generated PKCS#8 v2 document and its raw public key.
+    fn ed25519_pkcs8_and_public_key() -> (Vec<u8>, Vec<u8>) {
+        let pkcs8 = signature::Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("pkcs8");
+        let public_key = signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .expect("parse")
+            .public_key()
+            .as_ref()
+            .to_vec();
+        (pkcs8.as_ref().to_vec(), public_key)
+    }
+
+    /// A PKCS#8 key signs the detached COSE_Sign1 that ring and integrity-cose
+    /// compose by hand, byte for byte, and the verifier accepts it.
+    #[test]
+    fn in_process_ed25519_key_signs_detached_cose_sign1_from_pkcs8() {
+        const METHOD: &str = "urn:formspec:sig-method:ed25519-cose-sign1@1";
+        let (pkcs8, public_key) = ed25519_pkcs8_and_public_key();
+        let key = InProcessEd25519Key::from_pkcs8(&pkcs8).expect("parse pkcs8");
+        assert_eq!(key.public_key_bytes(), public_key.as_slice());
+
+        let payload = b"detached document payload";
+        let envelope = key.sign_detached_cose_sign1(b"document-kid", METHOD, payload);
+
+        let pair = signature::Ed25519KeyPair::from_pkcs8(&pkcs8).expect("parse");
+        let protected =
+            integrity_cose::detached_signature_protected_header(-8, b"document-kid", METHOD);
+        let by_hand = integrity_cose::encode_cose_sign1(
+            &protected,
+            None,
+            pair.sign(&integrity_cose::sig_structure_bytes(&protected, payload))
+                .as_ref(),
+        );
+        assert_eq!(envelope, by_hand);
+
+        let receipt = test_verifier()
+            .verify(
+                &VerifyRequest {
+                    signed_bytes: payload.to_vec(),
+                    signature_bytes: envelope,
+                    method_uri: METHOD.into(),
+                    key_ref: KeyRef::RawPublicKey(public_key),
+                },
+                &test_registry(),
+            )
+            .expect("verify");
+        assert!(receipt.is_verified());
+    }
+
+    /// A receipt signer built from a parsed key keeps its identity and signs
+    /// receipts that verify under that key's public half.
+    #[test]
+    fn receipt_signer_from_in_process_key_signs_under_its_identity() {
+        let (pkcs8, public_key) = ed25519_pkcs8_and_public_key();
+        let key = InProcessEd25519Key::from_pkcs8(&pkcs8).expect("parse pkcs8");
+        let signer = InProcessReceiptSigner::from_key_with_identity(
+            key,
+            Some(b"receipt-kid"),
+            "urn:test:receipt-signer",
+            DEFAULT_RECEIPT_METHOD_URI,
+        );
+        assert_eq!(signer.public_key_bytes(), public_key.as_slice());
+        assert_eq!(signer.signer_id(), "urn:test:receipt-signer");
+
+        let payload = b"canonical receipt payload";
+        let envelope = signer.sign_receipt(payload).expect("sign");
+        let (cose, _) = integrity_cose::decode_cose_sign1_with_method_uri(
+            &envelope,
+            DEFAULT_RECEIPT_METHOD_URI_PREFIX,
+        )
+        .expect("decode");
+        assert_eq!(cose.kid(), Some(b"receipt-kid".as_slice()));
+        signature::UnparsedPublicKey::new(&signature::ED25519, &public_key)
+            .verify(
+                &integrity_cose::sig_structure_bytes(cose.protected_header(), payload),
+                cose.signature(),
+            )
+            .expect("receipt verifies under the parsed key");
+    }
+
+    /// Bytes that are not an Ed25519 PKCS#8 v2 document are refused, not panicked on.
+    #[test]
+    fn in_process_ed25519_key_refuses_non_pkcs8_bytes() {
+        let (_, public_key) = ed25519_pkcs8_and_public_key();
+        for bytes in [&b""[..], b"not a pkcs8 document", &public_key] {
+            assert!(matches!(
+                InProcessEd25519Key::from_pkcs8(bytes),
+                Err(ReceiptSignerError::KeyUnavailable { .. })
+            ));
+        }
+    }
+
+    /// Debug output carries the public key and nothing else.
+    #[test]
+    fn in_process_ed25519_key_debug_shows_only_the_public_key() {
+        let (pkcs8, public_key) = ed25519_pkcs8_and_public_key();
+        let key = InProcessEd25519Key::from_pkcs8(&pkcs8).expect("parse pkcs8");
+        assert_eq!(
+            format!("{key:?}"),
+            format!("InProcessEd25519Key {{ public_key: {public_key:?} }}")
+        );
     }
 }
