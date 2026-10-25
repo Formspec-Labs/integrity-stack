@@ -31,6 +31,9 @@ deny = [
     ] },
     { name = "ed25519-dalek", wrappers = ["integrity-cose", "integrity-verify", "integrity-verify-cli", "integrity-verify-parity"] },
     { name = "ring", wrappers = ["integrity-signature-ring"] },
+    # Only HPKE's key schedule (RFC 9180) and the curve crate under it run HKDF; the standalone
+    # verifier stays HKDF-free (trellis check-verifier-isolation, Core §16).
+    { name = "hkdf", wrappers = ["elliptic-curve", "hpke", "integrity-hpke"] },
     { name = "hex", wrappers = [
         "integrity-canonical",
         "integrity-cose",
