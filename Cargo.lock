@@ -891,7 +891,6 @@ name = "integrity-canonical"
 version = "0.1.0"
 dependencies = [
  "hex",
- "hkdf",
  "hmac",
  "serde",
  "serde_json",

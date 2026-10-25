@@ -9,7 +9,6 @@ repository = "https://github.com/Formspec-Labs/integrity-stack"
 [dependencies]
 hex = "0.4"
 hmac = "0.12"
-hkdf = "=0.12.4"
 serde = "1"
 # float_roundtrip keeps the correctly rounded f64 parse serde_json_canonicalizer used to switch on
 # for every graph that holds this crate; raw_value lets the text API keep number text exact.
