@@ -8,7 +8,9 @@
 //! # Algorithm identifier width
 //!
 //! This crate owns the width of a COSE `alg` value for the whole stack: `i64`.
-//! RFC 9052 types `alg` as CBOR `int` (major types 0/1, `-2^64..=2^64-1`), and
+//! RFC 9052 §3.1 types `alg` as `int / tstr`; the stack accepts only the
+//! `int` branch (a text `alg` is refused as "not an integer"). That branch is
+//! CBOR major types 0/1, `-2^64..=2^64-1`, and
 //! the IANA COSE Algorithms registry leaves both ends open (private use below
 //! -65536, expert review above 65535), so no `i32` bound holds. `i64` follows
 //! `coset`, whose integer labels are `i64` and which refuses wire integers
@@ -1164,6 +1166,14 @@ mod tests {
                 Some(alg)
             );
         }
+    }
+
+    #[test]
+    fn decode_refuses_text_alg() {
+        // MAP_1 { 1: "EdDSA" }: RFC 9052 allows a tstr alg; the stack does not.
+        let header = [0xa1, 0x01, 0x65, b'E', b'd', b'D', b'S', b'A'];
+        let error = decode_protected_header(&header).expect_err("text alg must refuse");
+        assert!(error.to_string().contains("is not an integer"), "{error}");
     }
 
     #[test]

@@ -102,7 +102,7 @@ fn key_ref_display(key_ref: &KeyRef) -> String {
 fn validate_key_length_for_alg(alg: i64, key_bytes: &[u8]) -> Result<(), String> {
     match alg {
         // Ed25519: 32 bytes raw.
-        -8 => {
+        integrity_cose::COSE_ALG_EDDSA => {
             if key_bytes.len() != 32 {
                 return Err(format!(
                     "ed25519 key must be 32 bytes; got {}",
@@ -441,8 +441,8 @@ impl RingVerifier {
         };
 
         let (alg, verify) = match entry.alg {
-            Some(-8) => (
-                -8,
+            Some(integrity_cose::COSE_ALG_EDDSA) => (
+                integrity_cose::COSE_ALG_EDDSA,
                 Self::verify_ed25519 as fn(&[u8], &[u8], &[u8]) -> Result<(), String>,
             ),
             Some(-7) => (
