@@ -499,7 +499,7 @@ pub struct VerifyRequest {
     pub key_ref: KeyRef,
 }
 
-/// Adapter-internal error surface for verifier implementations.
+/// Errors exposed by signature verifier implementations.
 #[derive(Debug, Error)]
 pub enum VerifierError {
     /// Method is not supported by the configured registry or adapter.
@@ -518,6 +518,18 @@ pub enum VerifierError {
     #[error("invalid COSE: {reason}")]
     InvalidCoseEncoding {
         /// Encoding failure reason.
+        reason: String,
+    },
+    /// Key material could not be found for the requested reference.
+    #[error("key resolution failed: {reason}")]
+    KeyResolution {
+        /// Key lookup failure reason.
+        reason: String,
+    },
+    /// The configured resolver does not support the key reference.
+    #[error("unsupported key reference: {reason}")]
+    UnsupportedKeyRef {
+        /// Unsupported reference reason.
         reason: String,
     },
     /// Internal verifier failure.

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use integrity_signature::{
     AdapterInfo, ClockHandle, KeyInfo, KeyRef, KeyResolverError, KeyResolverHandle, ReceiptSigner,
     ReceiptSignerError, ReceiptSignerHandle, SignatureMethodRegistry, StaticKeyResolver,
@@ -301,55 +303,14 @@ impl RingVerifier {
         Ok(())
     }
 
-    fn unsupported_receipt(
+    fn build_receipt(
         &self,
+        result: VerificationResult,
         request: &VerifyRequest,
         registry: &SignatureMethodRegistry,
     ) -> VerificationReceipt {
         VerificationReceipt {
-            result: VerificationResult::Unsupported,
-            method: request.method_uri.clone(),
-            method_registry_version: registry.version.clone(),
-            adapter: self.adapter_info.clone(),
-            key: KeyInfo {
-                r#ref: key_ref_display(&request.key_ref).into(),
-                version: None,
-                snapshot: None,
-            },
-            verified_at: utc_to_rfc3339_seconds(self.clock.now_utc()),
-            context: None,
-            receipt_bytes: None,
-        }
-    }
-
-    fn failed_receipt(
-        &self,
-        request: &VerifyRequest,
-        registry: &SignatureMethodRegistry,
-    ) -> VerificationReceipt {
-        VerificationReceipt {
-            result: VerificationResult::Failed,
-            method: request.method_uri.clone(),
-            method_registry_version: registry.version.clone(),
-            adapter: self.adapter_info.clone(),
-            key: KeyInfo {
-                r#ref: key_ref_display(&request.key_ref).into(),
-                version: None,
-                snapshot: None,
-            },
-            verified_at: utc_to_rfc3339_seconds(self.clock.now_utc()),
-            context: None,
-            receipt_bytes: None,
-        }
-    }
-
-    fn verified_receipt(
-        &self,
-        request: &VerifyRequest,
-        registry: &SignatureMethodRegistry,
-    ) -> VerificationReceipt {
-        VerificationReceipt {
-            result: VerificationResult::Verified,
+            result,
             method: request.method_uri.clone(),
             method_registry_version: registry.version.clone(),
             adapter: self.adapter_info.clone(),
@@ -436,19 +397,23 @@ impl RingVerifier {
                 // silently activates any string that isn't the keyword
                 // (PR-SWEEP-001 / fs-lwsi will fold this into an enum match).
                 if e.status != "registered" {
-                    return Ok(self.unsupported_receipt(request, registry));
+                    return Ok(self.build_receipt(
+                        VerificationResult::Unsupported,
+                        request,
+                        registry,
+                    ));
                 }
                 e
             }
             None => {
-                return Ok(self.unsupported_receipt(request, registry));
+                return Ok(self.build_receipt(VerificationResult::Unsupported, request, registry));
             }
         };
 
         // Resolve key material from the typed KeyRef. Two branches:
-        //   - Kid(bytes): route through the configured KeyResolver. KeyNotFound
-        //     and Internal errors surface as VerifierError::Internal (per
-        //     fs-no9r — internal failures don't collapse to 'failed').
+        //   - Kid(bytes): resolve through the configured KeyResolver, preserving
+        //     missing-key, unsupported-reference, and internal failure types.
+        //     Resolution errors prevent a verdict rather than fabricating Failed.
         //   - RawPublicKey(bytes): caller has already committed to the key;
         //     skip resolution and skip the kid-binding check (no identifier
         //     to bind).
@@ -456,123 +421,68 @@ impl RingVerifier {
             KeyRef::Kid(_) => self
                 .key_resolver
                 .resolve(&request.key_ref)
-                .map_err(|error| {
-                    match error {
-                        // KeyNotFound is the caller-distinguishable case but still
-                        // an adapter-internal verdict-not-reached situation: the
-                        // verifier could not check the signature because the kid
-                        // pointed to nothing. fs-no9r: don't collapse to 'failed'.
-                        KeyResolverError::KeyNotFound { kid } => VerifierError::Internal {
-                            reason: format!("key resolver: kid not found ({} bytes)", kid.len()),
-                        },
-                        KeyResolverError::UnsupportedKeyRef(reason) => VerifierError::Internal {
-                            reason: format!("key resolver: unsupported key ref: {reason}"),
-                        },
-                        KeyResolverError::Internal(reason) => VerifierError::Internal {
-                            reason: format!("key resolver: {reason}"),
-                        },
+                .map_err(|error| match error {
+                    KeyResolverError::KeyNotFound { kid } => VerifierError::KeyResolution {
+                        reason: format!("key resolver: kid not found ({} bytes)", kid.len()),
+                    },
+                    KeyResolverError::UnsupportedKeyRef(reason) => {
+                        VerifierError::UnsupportedKeyRef { reason }
                     }
+                    KeyResolverError::Internal(reason) => VerifierError::Internal {
+                        reason: format!("key resolver: {reason}"),
+                    },
                 })?,
             KeyRef::RawPublicKey(bytes) => bytes.clone(),
         };
 
-        let result = match entry.alg {
-            Some(alg @ (-8 | -7 | -37)) => {
-                // Per-algorithm key-length validation. Wrong-length keys never
-                // reach ring's primitive routines.
-                if let Err(reason) = validate_key_length_for_alg(alg, &key_bytes) {
-                    return Ok(self.unsupported_receipt_with_reason(request, registry, reason));
-                }
-                let (cose, method_uri) = integrity_cose::decode_cose_sign1_with_method_uri(
-                    &request.signature_bytes,
-                    &self.method_uri_prefix,
-                )
-                .map_err(|error| VerifierError::InvalidCoseEncoding {
-                    reason: error.to_string(),
-                })?;
-                if method_uri != request.method_uri.as_str() {
-                    return Ok(self.unsupported_receipt_with_reason(
-                        request,
-                        registry,
-                        format!(
-                            "method_uri mismatch: request {:?} != cose {:?}",
-                            request.method_uri.as_str(),
-                            method_uri
-                        ),
-                    ));
-                }
-                if cose.alg() != Some(i128::from(alg)) {
-                    return Ok(self.unsupported_receipt_with_reason(
-                        request,
-                        registry,
-                        format!("cose alg mismatch: expected {}, got {:?}", alg, cose.alg()),
-                    ));
-                }
-                // kid-binding (fs-skj0). Only applicable to KeyRef::Kid —
-                // RawPublicKey skips because there is no identifier to bind.
-                if let KeyRef::Kid(expected_kid) = &request.key_ref {
-                    match cose.kid() {
-                        Some(actual_kid) if actual_kid == expected_kid.as_slice() => {}
-                        Some(_) => {
-                            return Ok(self.unsupported_receipt_with_reason(
-                                request,
-                                registry,
-                                "kid mismatch: cose.kid != request.keyRef".to_string(),
-                            ));
-                        }
-                        None => {
-                            return Ok(self.unsupported_receipt_with_reason(
-                                request,
-                                registry,
-                                "kid mismatch: cose envelope has no kid but request.keyRef is Kid"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                }
-                let payload =
-                    cose.resolve_payload(Some(&request.signed_bytes))
-                        .map_err(|error| VerifierError::InvalidCoseEncoding {
-                            reason: error.to_string(),
-                        })?;
-                let sig_structure =
-                    integrity_cose::sig_structure_bytes(cose.protected_header(), payload);
-                match alg {
-                    -8 => Self::verify_ed25519(&sig_structure, cose.signature(), &key_bytes),
-                    -7 => Self::verify_ecdsa_p256(&sig_structure, cose.signature(), &key_bytes),
-                    -37 => Self::verify_rsa_pss(&sig_structure, cose.signature(), &key_bytes),
-                    _ => unreachable!("outer pattern restricts supported algorithms"),
-                }
-            }
+        let (alg, verify) = match entry.alg {
+            Some(-8) => (
+                -8,
+                Self::verify_ed25519 as fn(&[u8], &[u8], &[u8]) -> Result<(), String>,
+            ),
+            Some(-7) => (
+                -7,
+                Self::verify_ecdsa_p256 as fn(&[u8], &[u8], &[u8]) -> Result<(), String>,
+            ),
+            Some(-37) => (
+                -37,
+                Self::verify_rsa_pss as fn(&[u8], &[u8], &[u8]) -> Result<(), String>,
+            ),
             None | Some(_) => {
-                return Ok(self.unsupported_receipt(request, registry));
+                return Ok(self.build_receipt(VerificationResult::Unsupported, request, registry));
             }
         };
-
-        match result {
-            Ok(()) => Ok(self.verified_receipt(request, registry)),
-            Err(_) => Ok(self.failed_receipt(request, registry)),
+        // Reject malformed key lengths before calling ring's verification primitive.
+        if validate_key_length_for_alg(alg, &key_bytes).is_err() {
+            return Ok(self.build_receipt(VerificationResult::Unsupported, request, registry));
         }
-    }
-
-    /// Builds an unsupported receipt with the supplied diagnostic reason.
-    /// The base receipt shape has no `reason` field (Rust port mirrors the
-    /// pre-fs-no9r shape — only TS receipts carry it today); for now the
-    /// reason is folded into the verifier-error path by callers that need
-    /// it surfaced. This helper exists so callers can route key-length /
-    /// kid-mismatch / resolver failures to a consistent verdict shape.
-    fn unsupported_receipt_with_reason(
-        &self,
-        request: &VerifyRequest,
-        registry: &SignatureMethodRegistry,
-        _reason: String,
-    ) -> VerificationReceipt {
-        // The Rust port's VerificationReceipt has no `reason` field today;
-        // we keep parity with the TS surface (fs-no9r added it there) when
-        // the Rust port adds the field. Until then the receipt-level signal
-        // is the Unsupported verdict; the textual reason is currently elided
-        // on the Rust side. Test surfaces assert the verdict shape.
-        self.unsupported_receipt(request, registry)
+        let (cose, method_uri) = integrity_cose::decode_cose_sign1_with_method_uri(
+            &request.signature_bytes,
+            &self.method_uri_prefix,
+        )
+        .map_err(|error| VerifierError::InvalidCoseEncoding {
+            reason: error.to_string(),
+        })?;
+        if method_uri != request.method_uri.as_str() || cose.alg() != Some(i128::from(alg)) {
+            return Ok(self.build_receipt(VerificationResult::Unsupported, request, registry));
+        }
+        // RawPublicKey has no identifier to bind; Kid must match the COSE header.
+        if let KeyRef::Kid(expected_kid) = &request.key_ref {
+            if cose.kid() != Some(expected_kid.as_slice()) {
+                return Ok(self.build_receipt(VerificationResult::Unsupported, request, registry));
+            }
+        }
+        let payload = cose
+            .resolve_payload(Some(&request.signed_bytes))
+            .map_err(|error| VerifierError::InvalidCoseEncoding {
+                reason: error.to_string(),
+            })?;
+        let sig_structure = integrity_cose::sig_structure_bytes(cose.protected_header(), payload);
+        let result = match verify(&sig_structure, cose.signature(), &key_bytes) {
+            Ok(()) => VerificationResult::Verified,
+            Err(_) => VerificationResult::Failed,
+        };
+        Ok(self.build_receipt(result, request, registry))
     }
 }
 
@@ -1195,7 +1105,7 @@ mod tests {
     // stringly-typed `KidOrThumbprint` path that sniffed `did:` / `urn:`
     // prefixes. That path is gone — `KeyRef` is typed and the resolver-port
     // takes over identifier resolution. Coverage for resolver failures lives
-    // in `kid_lookup_failure_returns_internal_error` below.
+    // in `kid_lookup_failure_returns_key_resolution_error` below.
 
     // ---------- Golden-vector round-trips (fs-wxoz) ----------
     //
@@ -2004,25 +1914,39 @@ mod tests {
             method_uri: "urn:formspec:sig-method:ed25519-cose-sign1@1".into(),
             key_ref: KeyRef::Kid(kid),
         };
-        let receipt = verifier.verify(&request, &test_registry()).expect("verify");
-        assert!(receipt.is_verified());
-        assert_eq!(receipt.verified_at, RECORDED_TIME);
+        let verified = verifier.verify(&request, &test_registry()).expect("verify");
+        assert!(verified.is_verified());
+        assert_eq!(verified.verified_at, RECORDED_TIME);
         assert_eq!(
-            receipt.adapter.id.as_str(),
+            verified.adapter.id.as_str(),
             test_config().adapter_id.as_str()
         );
         assert_eq!(
-            receipt.adapter.version.as_str(),
+            verified.adapter.version.as_str(),
             test_config().adapter_version.as_str()
         );
-        assert!(receipt.receipt_bytes.is_none());
+        assert!(verified.receipt_bytes.is_none());
 
         request.signed_bytes.push(0);
-        let receipt = verifier
+        let failed = verifier
             .verify(&request, &test_registry())
             .expect("verdict");
-        assert_eq!(receipt.result, VerificationResult::Failed);
-        assert_eq!(receipt.verified_at, RECORDED_TIME);
+        let mut expected = verified;
+        expected.result = VerificationResult::Failed;
+        assert_eq!(failed, expected, "failed receipt preserves all metadata");
+
+        for alg in [Some(42), None] {
+            let mut registry = test_registry();
+            registry.entries[0].alg = alg;
+            let unsupported = verifier
+                .verify(&request, &registry)
+                .expect("unsupported verdict");
+            expected.result = VerificationResult::Unsupported;
+            assert_eq!(
+                unsupported, expected,
+                "unsupported receipt preserves all metadata"
+            );
+        }
     }
 
     /// fs-skj0 — kid mismatch attack vector. COSE envelope carries
@@ -2063,11 +1987,9 @@ mod tests {
         );
     }
 
-    /// Resolver-returns-KeyNotFound surfaces as `VerifierError::Internal`,
-    /// NOT as a `failed` verdict. fs-no9r contract: adapter-internal failures
-    /// don't collapse to "signature checked and failed".
+    /// Missing keys remain distinguishable from primitive or internal failures.
     #[test]
-    fn kid_lookup_failure_returns_internal_error() {
+    fn kid_lookup_failure_returns_key_resolution_error() {
         let envelope_kid = b"some-kid".to_vec();
         let (signed_bytes, signature_bytes, _) = ed25519_envelope_with_kid(&envelope_kid);
 
@@ -2090,13 +2012,68 @@ mod tests {
             )
             .expect_err("KeyNotFound must surface as Err, not Ok(failed)");
         match error {
-            VerifierError::Internal { reason } => {
+            VerifierError::KeyResolution { reason } => {
                 assert!(
                     reason.contains("kid not found"),
                     "expected kid-not-found phrasing, got: {reason}"
                 );
             }
-            other => panic!("expected VerifierError::Internal, got: {other}"),
+            other => panic!("expected VerifierError::KeyResolution, got: {other}"),
+        }
+    }
+
+    #[derive(Debug)]
+    struct RejectingKeyResolver {
+        unsupported: bool,
+    }
+
+    impl KeyResolver for RejectingKeyResolver {
+        fn resolve(&self, _: &KeyRef) -> Result<Vec<u8>, KeyResolverError> {
+            if self.unsupported {
+                Err(KeyResolverError::UnsupportedKeyRef(
+                    "remote keys disabled".into(),
+                ))
+            } else {
+                Err(KeyResolverError::Internal("provider unavailable".into()))
+            }
+        }
+
+        fn resolver_id(&self) -> &str {
+            "urn:test:rejecting-resolver"
+        }
+    }
+
+    #[test]
+    fn resolver_failure_types_survive_supported_and_unsupported_algorithms() {
+        for alg in [Some(-8), Some(42), None] {
+            for unsupported in [true, false] {
+                let verifier = RingVerifier::new_with_config_and_key_resolver(
+                    test_config(),
+                    Arc::new(RejectingKeyResolver { unsupported }),
+                );
+                let mut registry = test_registry();
+                registry.entries[0].alg = alg;
+                let error = verifier
+                    .verify(
+                        &VerifyRequest {
+                            signed_bytes: vec![],
+                            signature_bytes: vec![],
+                            method_uri: registry.entries[0].id.clone(),
+                            key_ref: KeyRef::Kid(b"lookup-key".to_vec()),
+                        },
+                        &registry,
+                    )
+                    .expect_err("resolver failure must prevent a receipt");
+                match (unsupported, error) {
+                    (true, VerifierError::UnsupportedKeyRef { reason }) => {
+                        assert!(reason.contains("remote keys disabled"));
+                    }
+                    (false, VerifierError::Internal { reason }) => {
+                        assert!(reason.contains("provider unavailable"));
+                    }
+                    (_, other) => panic!("unexpected resolver error: {other}"),
+                }
+            }
         }
     }
 
@@ -2131,7 +2108,7 @@ mod tests {
 
     /// Default (no explicit resolver) constructor wires an empty
     /// `StaticKeyResolver`. `KeyRef::Kid` immediately surfaces a
-    /// `VerifierError::Internal` — the verifier cannot reach a verdict
+    /// `VerifierError::KeyResolution` — the verifier cannot reach a verdict
     /// because there is no key to verify against. Pairs with the
     /// new_with_key_resolver constructor as the canonical migration: callers
     /// that previously passed raw key bytes via `KidOrThumbprint(base64(...))`
@@ -2154,7 +2131,7 @@ mod tests {
                 &registry,
             )
             .expect_err("default verifier has no resolver — Kid must fail");
-        assert!(matches!(error, VerifierError::Internal { .. }));
+        assert!(matches!(error, VerifierError::KeyResolution { .. }));
     }
 
     /// `key.ref` field on the receipt is human-readable: `Kid(bytes)` is
