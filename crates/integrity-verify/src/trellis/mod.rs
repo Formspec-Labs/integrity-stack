@@ -28,7 +28,7 @@ use ed25519_dalek::ed25519::signature::Verifier;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
-use integrity_cose::sig_structure_bytes;
+use integrity_cose::{COSE_ALG_EDDSA, sig_structure_bytes};
 
 use trellis_types::{
     ArtifactType, CONTENT_DOMAIN, CborHelperError, SUITE_ID_PHASE_1, domain_separated_sha256,
@@ -101,8 +101,6 @@ pub use validator::{
 };
 
 const SUITE_ID_PHASE_1_I128: i128 = SUITE_ID_PHASE_1 as i128;
-
-const ALG_EDDSA: i128 = -8;
 
 const POSTURE_DECLARATION_DOMAIN: &str = "trellis-posture-declaration-v1";
 
@@ -531,7 +529,7 @@ pub(crate) fn verify_event_set_with_classes(
                 };
             }
         };
-        if event.alg != ALG_EDDSA
+        if event.alg != COSE_ALG_EDDSA
             || event.suite_id != SUITE_ID_PHASE_1_I128
             || event.artifact_type != ArtifactType::Event
         {

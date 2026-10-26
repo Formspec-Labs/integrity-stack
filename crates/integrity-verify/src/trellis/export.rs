@@ -12,8 +12,8 @@ use trellis_types::{
 };
 
 use super::{
-    ALG_EDDSA, INTEROP_SIDECARS_PATH_PREFIX, SUITE_ID_PHASE_1_I128,
-    attachment_entry_matches_binding, verify_event_set_with_classes, verify_signature,
+    INTEROP_SIDECARS_PATH_PREFIX, SUITE_ID_PHASE_1_I128, attachment_entry_matches_binding,
+    verify_event_set_with_classes, verify_signature,
 };
 use crate::trellis::certificate::{
     verify_certificate_attachment_lineage, verify_certificate_catalog,
@@ -39,6 +39,7 @@ use crate::trellis::util::{binding_lineage_graph_has_cycle, bytes_array, hex_dec
 use crate::trellis::{
     DomainEvent, DomainExport, EXPORT_ATTEMPT_DOMAIN, RecordValidator, VerificationWithDomain,
 };
+use integrity_cose::COSE_ALG_EDDSA;
 
 /// Verifies a complete export ZIP.
 pub fn verify_export_zip_with_validator(
@@ -221,7 +222,7 @@ pub(crate) fn verify_export_zip_with_record_validator(
         }
     };
 
-    if manifest.alg != ALG_EDDSA
+    if manifest.alg != COSE_ALG_EDDSA
         || manifest.suite_id != SUITE_ID_PHASE_1_I128
         || manifest.artifact_type != ArtifactType::Manifest
     {
@@ -636,7 +637,7 @@ pub(crate) fn verify_export_zip_with_record_validator(
     let mut prior_checkpoint_digest: Option<[u8; 32]> = None;
     let mut head_checkpoint_root: Option<[u8; 32]> = None;
     for checkpoint in &checkpoints {
-        if checkpoint.alg != ALG_EDDSA
+        if checkpoint.alg != COSE_ALG_EDDSA
             || checkpoint.suite_id != SUITE_ID_PHASE_1_I128
             || checkpoint.artifact_type != ArtifactType::Checkpoint
         {

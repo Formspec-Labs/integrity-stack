@@ -417,7 +417,7 @@ impl Display for VerifyError {
 pub(crate) struct ParsedSign1 {
     pub(crate) protected_bytes: Vec<u8>,
     pub(crate) kid: Vec<u8>,
-    pub(crate) alg: i128,
+    pub(crate) alg: i64,
     pub(crate) suite_id: i128,
     pub(crate) artifact_type: trellis_types::ArtifactType,
     pub(crate) payload: Option<Vec<u8>>,

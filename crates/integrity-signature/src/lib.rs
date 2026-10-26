@@ -454,8 +454,11 @@ pub struct MethodRegistryEntry {
     pub suite: String,
     /// Wire format.
     pub wire: String,
-    /// COSE algorithm label, when applicable.
-    pub alg: Option<i32>,
+    /// COSE `alg` value, when applicable.
+    ///
+    /// `i64` is the width `integrity-cose` owns for every COSE `alg`;
+    /// deserialization refuses a number outside it rather than narrowing.
+    pub alg: Option<i64>,
     /// Entry status.
     pub status: String,
     /// Optional deprecation notice.
@@ -693,6 +696,28 @@ mod tests {
         assert!(resolved.is_some());
         assert_eq!(resolved.unwrap().suite, "ed25519");
         assert_eq!(registry.current_version(), "1.0.0");
+    }
+
+    #[test]
+    fn registry_alg_round_trips_i64_extremes_and_refuses_wider_numbers() {
+        let entry = |alg: &str| {
+            format!(r#"{{"id":"urn:x:y@1","suite":"s","wire":"w","alg":{alg},"status":"active"}}"#)
+        };
+        for alg in [i64::MIN, -(1_i64 << 40), 1_i64 << 40, i64::MAX] {
+            let parsed: MethodRegistryEntry =
+                serde_json::from_str(&entry(&alg.to_string())).expect("in-range alg");
+            assert_eq!(parsed.alg, Some(alg));
+            let reparsed: MethodRegistryEntry =
+                serde_json::from_str(&serde_json::to_string(&parsed).expect("encode"))
+                    .expect("re-decode");
+            assert_eq!(reparsed.alg, Some(alg));
+        }
+        for alg in ["-9223372036854775809", "9223372036854775808", "-8.0"] {
+            assert!(
+                serde_json::from_str::<MethodRegistryEntry>(&entry(alg)).is_err(),
+                "alg {alg} must be refused, not narrowed"
+            );
+        }
     }
 
     #[test]

@@ -10,6 +10,11 @@ pub use integrity_signature::{
     RECEIPT_SIGNED_PAYLOAD_DOMAIN, canonical_receipt_payload_bytes,
     canonical_receipt_payload_bytes_with_domain,
 };
+/// The `ring` whose `Ed25519KeyPair` this crate's signer API accepts.
+///
+/// Callers that build key pairs name `ring` through this re-export instead of
+/// pinning their own, so the two versions cannot drift apart.
+pub use ring;
 use ring::rand::SystemRandom;
 use ring::signature;
 use ring::signature::KeyPair;
@@ -94,7 +99,7 @@ fn key_ref_display(key_ref: &KeyRef) -> String {
 /// inputs before they reach ring's verify routines so the adapter never
 /// asks a primitive to interpret bytes of the wrong shape. Closes the
 /// per-algorithm-length-validation gap from fs-0gzb.
-fn validate_key_length_for_alg(alg: i32, key_bytes: &[u8]) -> Result<(), String> {
+fn validate_key_length_for_alg(alg: i64, key_bytes: &[u8]) -> Result<(), String> {
     match alg {
         // Ed25519: 32 bytes raw.
         -8 => {
@@ -463,7 +468,7 @@ impl RingVerifier {
         .map_err(|error| VerifierError::InvalidCoseEncoding {
             reason: error.to_string(),
         })?;
-        if method_uri != request.method_uri.as_str() || cose.alg() != Some(i128::from(alg)) {
+        if method_uri != request.method_uri.as_str() || cose.alg() != Some(alg) {
             return Ok(self.build_receipt(VerificationResult::Unsupported, request, registry));
         }
         // RawPublicKey has no identifier to bind; Kid must match the COSE header.
@@ -485,9 +490,6 @@ impl RingVerifier {
         Ok(self.build_receipt(result, request, registry))
     }
 }
-
-/// COSE `alg` for EdDSA (RFC 9053 §2.2), the only algorithm an Ed25519 key signs under.
-const COSE_ALG_EDDSA: i32 = -8;
 
 /// Ed25519 key pair held in process memory, parsed from PKCS#8.
 ///
@@ -534,8 +536,11 @@ impl InProcessEd25519Key {
         method_uri: &str,
         payload: &[u8],
     ) -> Vec<u8> {
-        let protected =
-            integrity_cose::detached_signature_protected_header(COSE_ALG_EDDSA, kid, method_uri);
+        let protected = integrity_cose::detached_signature_protected_header(
+            integrity_cose::COSE_ALG_EDDSA,
+            kid,
+            method_uri,
+        );
         let signature = self
             .key_pair
             .sign(&integrity_cose::sig_structure_bytes(&protected, payload));
@@ -1269,7 +1274,7 @@ mod tests {
 
     struct GoldenVector<'a> {
         method_uri: &'a str,
-        registry_alg: i32,
+        registry_alg: i64,
         public_key_format: &'a str,
         public_key: &'a [u8],
         signed_bytes: &'a [u8],

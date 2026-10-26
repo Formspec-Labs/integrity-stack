@@ -4,6 +4,17 @@
 //! This crate owns generic COSE_Sign1 parsing, protected-header construction,
 //! RFC 9052 `Sig_structure` construction, and Ed25519 helper operations used
 //! by profile crates. Profile-specific semantics remain in callers.
+//!
+//! # Algorithm identifier width
+//!
+//! This crate owns the width of a COSE `alg` value for the whole stack: `i64`.
+//! RFC 9052 types `alg` as CBOR `int` (major types 0/1, `-2^64..=2^64-1`), and
+//! the IANA COSE Algorithms registry leaves both ends open (private use below
+//! -65536, expert review above 65535), so no `i32` bound holds. `i64` follows
+//! `coset`, whose integer labels are `i64` and which refuses wire integers
+//! outside that range (`OutOfRangeIntegerValue`): every `i64` encodes as a
+//! CBOR `int`, so encoders stay total, and decoders refuse the two slivers of
+//! CBOR `int` that `i64` cannot hold instead of truncating them.
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +35,8 @@ pub use key_file::KeyFileSigner;
 
 /// COSE algorithm protected-header label.
 pub const COSE_LABEL_ALG: i128 = 1;
+/// COSE `alg` value for EdDSA (RFC 9053 §2.2), the only one an Ed25519 key signs under.
+pub const COSE_ALG_EDDSA: i64 = -8;
 /// COSE key identifier protected-header label.
 pub const COSE_LABEL_KID: i128 = 4;
 /// COSE protected-header label for an integrity profile suite.
@@ -83,7 +96,7 @@ const CBOR_TAG_18_COSE_SIGN1: u8 = 0xd2;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoseSign1 {
     protected_header: Vec<u8>,
-    alg: Option<i128>,
+    alg: Option<i64>,
     kid: Option<Vec<u8>>,
     suite_id: Option<u64>,
     artifact_type: Option<String>,
@@ -100,7 +113,7 @@ impl CoseSign1 {
 
     /// Returns the COSE algorithm value, if present.
     #[must_use]
-    pub fn alg(&self) -> Option<i128> {
+    pub fn alg(&self) -> Option<i64> {
         self.alg
     }
 
@@ -242,7 +255,7 @@ pub fn decode_cose_sign1_value(value: &Value) -> Result<CoseSign1, CoseError> {
 
     Ok(CoseSign1 {
         protected_header,
-        alg: integer_label_i128(protected_map, COSE_LABEL_ALG)?,
+        alg: integer_label_i64(protected_map, COSE_LABEL_ALG)?,
         kid: integer_label_bytes(protected_map, COSE_LABEL_KID)?,
         suite_id: integer_label_u64(protected_map, COSE_LABEL_SUITE_ID)?,
         artifact_type: integer_label_tstr(protected_map, COSE_LABEL_ARTIFACT_TYPE)?,
@@ -302,7 +315,7 @@ pub fn decode_cose_sign1_array(bytes: &[u8]) -> Result<Vec<CoseSign1>, CoseError
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtectedHeader {
     /// COSE algorithm identifier. Required on every envelope.
-    pub alg: i128,
+    pub alg: i64,
     /// Key identifier bytes, when the envelope carries a `kid`.
     pub kid: Option<Vec<u8>>,
     /// Trellis suite identifier — populated for substrate envelopes.
@@ -326,8 +339,9 @@ pub struct ProtectedHeader {
 /// dispatching before decoding the full envelope).
 ///
 /// # Errors
-/// Returns an error when bytes are not a CBOR map, when `alg` is absent or
-/// non-integer, when an integer label appears with the wrong value type, or
+/// Returns an error when bytes are not a CBOR map, when `alg` is absent,
+/// non-integer, or outside the `i64` range, when an integer label appears
+/// with the wrong value type, or
 /// when the map repeats a label (the shared CBOR decoder refuses repeats).
 pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseError> {
     let value = decode_cbor_value(bytes)
@@ -337,7 +351,7 @@ pub fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, CoseErro
         .ok_or_else(|| CoseError::new("protected header does not decode to a map"))?;
     reject_retired_dispatch_label(map)?;
 
-    let alg = integer_label_i128(map, COSE_LABEL_ALG)?
+    let alg = integer_label_i64(map, COSE_LABEL_ALG)?
         .ok_or_else(|| CoseError::new("protected header missing required alg label"))?;
     let kid = integer_label_bytes(map, COSE_LABEL_KID)?;
     let suite_id = integer_label_u64(map, COSE_LABEL_SUITE_ID)?;
@@ -388,6 +402,18 @@ fn integer_label_i128(map: &[(Value, Value)], label: i128) -> Result<Option<i128
                 .as_integer()
                 .map(i128::from)
                 .ok_or_else(|| CoseError::new(format!("COSE label {label} is not an integer")))
+        })
+        .transpose()
+}
+
+fn integer_label_i64(map: &[(Value, Value)], label: i128) -> Result<Option<i64>, CoseError> {
+    integer_label_i128(map, label)?
+        .map(|integer| {
+            i64::try_from(integer).map_err(|_| {
+                CoseError::new(format!(
+                    "COSE label {label} integer {integer} is outside the i64 range"
+                ))
+            })
         })
         .transpose()
 }
@@ -466,12 +492,12 @@ pub fn derive_kid(suite_id: u64, public_key: [u8; 32]) -> [u8; 16] {
 /// Builds the current Trellis event protected-header map bytes.
 #[must_use]
 pub fn protected_header_bytes(kid: [u8; 16]) -> Vec<u8> {
-    substrate_protected_header(-8, &kid, SUITE_ID_PHASE_1, "event")
+    substrate_protected_header(COSE_ALG_EDDSA, &kid, SUITE_ID_PHASE_1, "event")
 }
 
 /// Builds protected-header map bytes for a caller-supplied algorithm.
 #[must_use]
-pub fn protected_header_bytes_for_alg(alg: i128, kid: Option<&[u8]>) -> Vec<u8> {
+pub fn protected_header_bytes_for_alg(alg: i64, kid: Option<&[u8]>) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(if kid.is_some() {
         CBOR_MAP_2
@@ -479,7 +505,7 @@ pub fn protected_header_bytes_for_alg(alg: i128, kid: Option<&[u8]>) -> Vec<u8> 
         CBOR_MAP_1
     });
     bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
-    bytes.extend_from_slice(&encode_i128(alg));
+    bytes.extend_from_slice(&encode_cbor_int(alg));
     if let Some(kid) = kid {
         bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
         bytes.extend_from_slice(&encode_bstr(kid));
@@ -497,7 +523,7 @@ pub fn protected_header_bytes_for_alg(alg: i128, kid: Option<&[u8]>) -> Vec<u8> 
 /// value semantics.
 #[must_use]
 pub fn substrate_protected_header(
-    alg: i32,
+    alg: i64,
     kid: &[u8],
     suite_id: u64,
     artifact_type: &str,
@@ -505,7 +531,7 @@ pub fn substrate_protected_header(
     let mut bytes = Vec::with_capacity(48);
     bytes.push(CBOR_MAP_4);
     bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
-    bytes.extend_from_slice(&encode_i128(i128::from(alg)));
+    bytes.extend_from_slice(&encode_cbor_int(alg));
     bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
     bytes.extend_from_slice(&encode_bstr(kid));
     bytes.extend_from_slice(&encode_cose_suite_id_label());
@@ -524,11 +550,11 @@ pub fn substrate_protected_header(
 /// dispatch the right validator. This crate enforces the byte layout, not
 /// the URI scheme or value semantics.
 #[must_use]
-pub fn detached_signature_protected_header(alg: i32, kid: &[u8], method_uri: &str) -> Vec<u8> {
+pub fn detached_signature_protected_header(alg: i64, kid: &[u8], method_uri: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(48);
     bytes.push(CBOR_MAP_3);
     bytes.extend_from_slice(&encode_uint(COSE_LABEL_ALG as u64));
-    bytes.extend_from_slice(&encode_i128(i128::from(alg)));
+    bytes.extend_from_slice(&encode_cbor_int(alg));
     bytes.extend_from_slice(&encode_uint(COSE_LABEL_KID as u64));
     bytes.extend_from_slice(&encode_bstr(kid));
     bytes.extend_from_slice(&encode_cose_method_uri_label());
@@ -627,11 +653,12 @@ pub fn sign_ed25519(private_seed: [u8; 32], sig_structure: &[u8]) -> [u8; 64] {
     signature.to_bytes()
 }
 
-fn encode_i128(value: i128) -> Vec<u8> {
-    if value >= 0 {
-        encode_uint(value as u64)
-    } else {
-        encode_cbor_negative_int((-1 - value) as u64)
+/// Encodes any `i64` as a CBOR `int`; total because `i64` lies inside its range.
+fn encode_cbor_int(value: i64) -> Vec<u8> {
+    match u64::try_from(value) {
+        Ok(unsigned) => encode_uint(unsigned),
+        // Major type 1 carries `-1 - value`, i.e. `|value| - 1` for negatives.
+        Err(_) => encode_cbor_negative_int(value.unsigned_abs() - 1),
     }
 }
 
@@ -1105,5 +1132,63 @@ mod tests {
         assert!(consumer_header.method_uri.is_some());
         assert!(consumer_header.suite_id.is_none());
         assert!(consumer_header.artifact_type.is_none());
+    }
+
+    #[test]
+    fn alg_extremes_round_trip_through_every_encoder_and_decoder() {
+        // Private-use values far outside i32, plus both i64 ends.
+        for alg in [
+            i64::MIN,
+            -(1_i64 << 40),
+            -65_537,
+            65_536,
+            1_i64 << 40,
+            i64::MAX,
+        ] {
+            let detached = detached_signature_protected_header(alg, &[0x44; 16], "urn:x:y@1");
+            assert_eq!(
+                decode_protected_header(&detached).expect("detached").alg,
+                alg
+            );
+
+            let substrate = substrate_protected_header(alg, &[0x44; 16], 1, "event");
+            assert_eq!(
+                decode_protected_header(&substrate).expect("substrate").alg,
+                alg
+            );
+
+            let bare = protected_header_bytes_for_alg(alg, None);
+            let envelope = sign1_bytes(&bare, b"payload", [0x55; 64]);
+            assert_eq!(
+                decode_cose_sign1(&envelope).expect("sign1").alg(),
+                Some(alg)
+            );
+        }
+    }
+
+    #[test]
+    fn decode_refuses_cbor_int_alg_outside_i64() {
+        // MAP_1 { 1: n } for n = -2^64 (major 1), 2^64 - 1 and 2^63 (major 0).
+        let out_of_range: [[u8; 9]; 3] = [
+            [0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            [0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            [0x1b, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        for alg in out_of_range {
+            let mut header = vec![0xa1, 0x01];
+            header.extend_from_slice(&alg);
+            let error = decode_protected_header(&header).expect_err("protected header must refuse");
+            assert!(
+                error.to_string().contains("outside the i64 range"),
+                "{error}"
+            );
+
+            let envelope = sign1_bytes(&header, b"payload", [0x55; 64]);
+            let error = decode_cose_sign1(&envelope).expect_err("COSE_Sign1 must refuse");
+            assert!(
+                error.to_string().contains("outside the i64 range"),
+                "{error}"
+            );
+        }
     }
 }
