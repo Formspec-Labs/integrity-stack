@@ -1065,6 +1065,7 @@ name = "trellis-witness-registry"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "integrity-cbor",
  "serde",
  "sha2",
 ]
