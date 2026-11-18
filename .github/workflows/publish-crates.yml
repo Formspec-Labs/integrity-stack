@@ -18,14 +18,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check release tag against the crate version
+      - name: Check release tag and find unpublished version
+        id: release
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 |
             jq -er '.packages[] | select(.name == "integrity-canonical") | .version')
           test "$GITHUB_REF_NAME" = "crates-v$version"
+          versions=$(curl --fail --silent --show-error --retry 3 \
+            --user-agent 'Integrity Stack release (github.com/Formspec-Labs/integrity-stack)' \
+            https://crates.io/api/v1/crates/integrity-canonical/versions)
+          published=$(jq -er --arg v "$version" '[.versions[].num] | index($v) | if . == null then "no" else "yes" end' <<< "$versions")
+          echo "published=$published" >> "$GITHUB_OUTPUT"
       - run: cargo package --locked -p integrity-canonical
       - uses: rust-lang/crates-io-auth-action@v1
+        if: steps.release.outputs.published == 'no'
         id: auth
       - run: cargo publish --locked -p integrity-canonical
+        if: steps.release.outputs.published == 'no'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
