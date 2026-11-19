@@ -20,6 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check release tag and find unpublished version
         id: release
+        shell: bash
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 |
             jq -er '.packages[] | select(.name == "integrity-canonical") | .version')
@@ -27,7 +28,12 @@ jobs:
           versions=$(curl --fail --silent --show-error --retry 3 \
             --user-agent 'Integrity Stack release (github.com/Formspec-Labs/integrity-stack)' \
             https://crates.io/api/v1/crates/integrity-canonical/versions)
-          published=$(jq -er --arg v "$version" '[.versions[].num] | index($v) | if . == null then "no" else "yes" end' <<< "$versions")
+          published=$(jq -er --arg v "$version" '
+            [.versions[] | select(.num == $v)]
+            | if length == 0 then "no"
+              elif any(.[]; .yanked != false) then error("matching crate version is yanked or has unknown yank status")
+              else "yes" end
+          ' <<< "$versions")
           echo "published=$published" >> "$GITHUB_OUTPUT"
       - run: cargo package --locked -p integrity-canonical
       - uses: rust-lang/crates-io-auth-action@v1
