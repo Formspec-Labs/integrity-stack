@@ -12,7 +12,13 @@ else
   echo "deny-bans: trellis/work-spec siblings absent; checking the default workspace only" >&2
 fi
 
+# cargo-deny finds the policy by walking up from each manifest's directory.
+if [[ ! -f deny.toml ]]; then
+  echo "deny-bans: missing $PWD/deny.toml" >&2
+  exit 1
+fi
+
 for manifest in "${manifests[@]}"; do
   echo "deny-bans: $manifest"
-  cargo deny --manifest-path "$manifest" check --config deny.toml bans
+  cargo deny --manifest-path "$manifest" check bans
 done
